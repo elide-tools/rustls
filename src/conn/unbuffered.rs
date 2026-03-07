@@ -45,6 +45,13 @@ impl<Data> UnbufferedConnectionCommon<Data> {
         mut early_data_available: impl FnMut(&mut Self) -> bool,
         early_data_state: impl FnOnce(&'c mut Self, &'i mut [u8]) -> ConnectionState<'c, 'i, Data>,
     ) -> UnbufferedStatus<'c, 'i, Data> {
+        // Enable zero-copy plaintext delivery: record the buffer's base
+        // address so take_received_plaintext can store offset/length pairs
+        // instead of copying data to an owned Vec. Must capture the pointer
+        // before DeframerSliceBuffer borrows the slice mutably.
+        self.core.common_state.incoming_tls_base = incoming_tls.as_ptr() as usize;
+        self.core.common_state.zero_copy_ranges.clear();
+
         let mut buffer = DeframerSliceBuffer::new(incoming_tls);
         let mut buffer_progress = self.core.hs_deframer.progress();
 
@@ -61,6 +68,11 @@ impl<Data> UnbufferedConnectionCommon<Data> {
                 .common_state
                 .received_plaintext
                 .is_empty()
+                || !self
+                    .core
+                    .common_state
+                    .zero_copy_ranges
+                    .is_empty()
             {
                 break (
                     buffer.pending_discard(),
@@ -327,26 +339,47 @@ impl<Data> fmt::Debug for ConnectionState<'_, '_, Data> {
 /// Application data is available
 pub struct ReadTraffic<'c, 'i, Data> {
     conn: &'c mut UnbufferedConnectionCommon<Data>,
-    // for forwards compatibility; to support in-place decryption in the future
-    _incoming_tls: &'i mut [u8],
+    /// The caller's incoming TLS buffer. Decrypted app-data records are
+    /// in-place within this buffer at the offsets recorded in
+    /// `CommonState::zero_copy_ranges`.
+    incoming_tls: &'i mut [u8],
 
     // owner of the latest chunk obtained in `next_record`, as borrowed by
-    // `AppDataRecord`
+    // `AppDataRecord` — used only for the fallback (buffered) path.
     chunk: Option<Vec<u8>>,
+
+    /// Index into `zero_copy_ranges` for the next zero-copy record to return.
+    zc_index: usize,
 }
 
 impl<'c, 'i, Data> ReadTraffic<'c, 'i, Data> {
-    fn new(conn: &'c mut UnbufferedConnectionCommon<Data>, _incoming_tls: &'i mut [u8]) -> Self {
+    fn new(conn: &'c mut UnbufferedConnectionCommon<Data>, incoming_tls: &'i mut [u8]) -> Self {
         Self {
             conn,
-            _incoming_tls,
+            incoming_tls,
             chunk: None,
+            zc_index: 0,
         }
     }
 
-    /// Decrypts and returns the next available app-data record
-    // TODO deprecate in favor of `Iterator` implementation, which requires in-place decryption
+    /// Decrypts and returns the next available app-data record.
+    ///
+    /// When using the unbuffered API, plaintext is returned as a slice into the
+    /// caller's `incoming_tls` buffer — zero copies, zero allocations.
     pub fn next_record(&mut self) -> Option<Result<AppDataRecord<'_>, Error>> {
+        // Zero-copy path: return a slice from the caller's buffer.
+        let ranges = &self.conn.core.common_state.zero_copy_ranges;
+        if self.zc_index < ranges.len() {
+            let (offset, len) = ranges[self.zc_index];
+            self.zc_index += 1;
+            let payload = &self.incoming_tls[offset..offset + len];
+            return Some(Ok(AppDataRecord {
+                discard: 0,
+                payload,
+            }));
+        }
+
+        // Fallback: owned-data path (buffered API or non-borrowed Payload).
         self.chunk = self
             .conn
             .core
@@ -361,10 +394,15 @@ impl<'c, 'i, Data> ReadTraffic<'c, 'i, Data> {
         })
     }
 
-    /// Returns the payload size of the next app-data record *without* decrypting it
+    /// Returns the payload size of the next app-data record *without* decrypting it.
     ///
-    /// Returns `None` if there are no more app-data records
+    /// Returns `None` if there are no more app-data records.
     pub fn peek_len(&self) -> Option<NonZeroUsize> {
+        // Check zero-copy ranges first.
+        let ranges = &self.conn.core.common_state.zero_copy_ranges;
+        if self.zc_index < ranges.len() {
+            return NonZeroUsize::new(ranges[self.zc_index].1);
+        }
         self.conn
             .core
             .common_state

@@ -50,6 +50,14 @@ pub struct CommonState {
     pub(crate) peer_certificates: Option<CertificateChain<'static>>,
     message_fragmenter: MessageFragmenter,
     pub(crate) received_plaintext: ChunkVecBuffer,
+    /// Zero-copy plaintext ranges: (offset, length) pairs into the caller's
+    /// `incoming_tls` buffer, recorded during unbuffered `process_tls_records`.
+    /// Avoids the `Payload::into_vec()` copy in `take_received_plaintext`.
+    pub(crate) zero_copy_ranges: Vec<(usize, usize)>,
+    /// Base address of the caller's `incoming_tls` buffer (as `usize`).
+    /// Non-zero only during unbuffered `process_tls_records` — enables the
+    /// zero-copy path in `take_received_plaintext`.
+    pub(crate) incoming_tls_base: usize,
     pub(crate) sendable_tls: ChunkVecBuffer,
     queued_key_update_message: Option<Vec<u8>>,
 
@@ -85,6 +93,8 @@ impl CommonState {
             peer_certificates: None,
             message_fragmenter: MessageFragmenter::default(),
             received_plaintext: ChunkVecBuffer::new(Some(DEFAULT_RECEIVED_PLAINTEXT_LIMIT)),
+            zero_copy_ranges: Vec::new(),
+            incoming_tls_base: 0,
             sendable_tls: ChunkVecBuffer::new(Some(DEFAULT_BUFFER_LIMIT)),
             queued_key_update_message: None,
             protocol: Protocol::Tcp,
@@ -482,6 +492,16 @@ impl CommonState {
 
     pub(crate) fn take_received_plaintext(&mut self, bytes: Payload<'_>) {
         self.temper_counters.received_app_data();
+        // Zero-copy path: when processing via the unbuffered API, the payload
+        // borrows from the caller's incoming_tls buffer. Record offset/length
+        // instead of copying to an owned Vec.
+        if self.incoming_tls_base != 0 {
+            if let Payload::Borrowed(slice) = &bytes {
+                let offset = slice.as_ptr() as usize - self.incoming_tls_base;
+                self.zero_copy_ranges.push((offset, slice.len()));
+                return;
+            }
+        }
         self.received_plaintext
             .append(bytes.into_vec());
     }
