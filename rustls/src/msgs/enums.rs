@@ -7,15 +7,7 @@ enum_builder! {
     #[repr(u8)]
     pub(crate) enum ClientCertificateType names ClientCertificateTypeNames {
         RSASign => 0x01,
-        DSSSign => 0x02,
-        RSAFixedDH => 0x03,
-        DSSFixedDH => 0x04,
-        RSAEphemeralDH => 0x05,
-        DSSEphemeralDH => 0x06,
-        FortezzaDMS => 0x14,
         ECDSASign => 0x40,
-        RSAFixedECDH => 0x41,
-        ECDSAFixedECDH => 0x42,
     }
 }
 
@@ -140,11 +132,8 @@ enum_builder! {
 enum_builder! {
     /// The `ECCurveType` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u8)]
     pub(crate) enum ECCurveType names ECCurveTypeNames {
-        ExplicitPrime => 0x01,
-        ExplicitChar2 => 0x02,
         NamedCurve => 0x03,
     }
 }
@@ -204,7 +193,7 @@ pub(crate) mod tests {
     fn test_enums() {
         test_enum8::<ClientCertificateType>(
             ClientCertificateType::RSASign,
-            ClientCertificateType::ECDSAFixedECDH,
+            ClientCertificateType::ECDSASign,
         );
         test_enum8::<Compression>(Compression::Null, Compression::LSZ);
         test_enum8::<AlertLevel>(AlertLevel::Warning, AlertLevel::Fatal);
@@ -214,7 +203,6 @@ pub(crate) mod tests {
             ECPointFormat::Uncompressed,
             ECPointFormat::ANSIX962CompressedChar2,
         );
-        test_enum8::<ECCurveType>(ECCurveType::ExplicitPrime, ECCurveType::NamedCurve);
         test_enum8::<PskKeyExchangeMode>(
             PskKeyExchangeMode::PSK_KE,
             PskKeyExchangeMode::PSK_DHE_KE,
