@@ -4,9 +4,8 @@
 enum_builder! {
     /// The `ClientCertificateType` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u8)]
-    pub(crate) enum ClientCertificateType {
+    pub(crate) enum ClientCertificateType names ClientCertificateTypeNames {
         RSASign => 0x01,
         DSSSign => 0x02,
         RSAFixedDH => 0x03,
@@ -23,9 +22,8 @@ enum_builder! {
 enum_builder! {
     /// The `Compression` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u8)]
-    pub enum Compression {
+    pub enum Compression names CompressionNames {
         Null => 0x00,
         Deflate => 0x01,
         LSZ => 0x40,
@@ -35,9 +33,8 @@ enum_builder! {
 enum_builder! {
     /// The `AlertLevel` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u8)]
-    pub enum AlertLevel {
+    pub enum AlertLevel names AlertLevelNames {
         Warning => 0x01,
         Fatal => 0x02,
     }
@@ -46,9 +43,8 @@ enum_builder! {
 enum_builder! {
     /// The `ExtensionType` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u16)]
-    pub enum ExtensionType {
+    pub enum ExtensionType names ExtensionTypeNames {
         ServerName => 0x0000,
         MaxFragmentLength => 0x0001,
         ClientCertificateUrl => 0x0002,
@@ -107,7 +103,7 @@ impl ExtensionType {
     pub(crate) fn ech_compress(&self) -> bool {
         // We match which extensions we will compress with BoringSSL and Go's stdlib.
         matches!(
-            self,
+            *self,
             Self::StatusRequest
                 | Self::EllipticCurves
                 | Self::SignatureAlgorithms
@@ -124,9 +120,8 @@ impl ExtensionType {
 enum_builder! {
     /// The `ServerNameType` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u8)]
-    pub(crate) enum ServerNameType {
+    pub(crate) enum ServerNameType names ServerNameTypeNames {
         HostName => 0x00,
     }
 }
@@ -134,9 +129,8 @@ enum_builder! {
 enum_builder! {
     /// The `ECPointFormat` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u8)]
-    pub enum ECPointFormat {
+    pub enum ECPointFormat names ECPointFormatNames {
         Uncompressed => 0x00,
         ANSIX962CompressedPrime => 0x01,
         ANSIX962CompressedChar2 => 0x02,
@@ -148,7 +142,7 @@ enum_builder! {
     /// from the various RFCs covering TLS, and are listed by IANA.
     /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u8)]
-    pub(crate) enum ECCurveType {
+    pub(crate) enum ECCurveType names ECCurveTypeNames {
         ExplicitPrime => 0x01,
         ExplicitChar2 => 0x02,
         NamedCurve => 0x03,
@@ -158,9 +152,8 @@ enum_builder! {
 enum_builder! {
     /// The `PskKeyExchangeMode` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u8)]
-    pub enum PskKeyExchangeMode {
+    pub enum PskKeyExchangeMode names PskKeyExchangeModeNames {
         PSK_KE => 0x00,
         PSK_DHE_KE => 0x01,
     }
@@ -169,9 +162,8 @@ enum_builder! {
 enum_builder! {
     /// The `KeyUpdateRequest` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u8)]
-    pub enum KeyUpdateRequest {
+    pub enum KeyUpdateRequest names KeyUpdateRequestNames {
         UpdateNotRequested => 0x00,
         UpdateRequested => 0x01,
     }
@@ -180,9 +172,8 @@ enum_builder! {
 enum_builder! {
     /// The `CertificateStatusType` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u8)]
-    pub enum CertificateStatusType {
+    pub enum CertificateStatusType names CertificateStatusTypeNames {
         OCSP => 0x01,
     }
 }
@@ -194,7 +185,7 @@ enum_builder! {
     ///
     /// [RFC 9849 Section 4]: <https://datatracker.ietf.org/doc/html/rfc9849#section-4>
     #[repr(u16)]
-    pub enum EchVersion {
+    pub enum EchVersion names EchVersionNames {
         V18 => 0xfe0d,
     }
 }

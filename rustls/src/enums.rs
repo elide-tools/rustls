@@ -132,9 +132,8 @@ impl AsRef<[u8]> for ApplicationProtocol<'_> {
 enum_builder! {
     /// The `HandshakeType` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u8)]
-    pub enum HandshakeType {
+    pub enum HandshakeType names HandshakeTypeNames {
         HelloRequest => 0x00,
         ClientHello => 0x01,
         ServerHello => 0x02,
@@ -161,9 +160,8 @@ enum_builder! {
 enum_builder! {
     /// The `ContentType` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u8)]
-    pub enum ContentType {
+    pub enum ContentType names ContentTypeNames {
         ChangeCipherSpec => 0x14,
         Alert => 0x15,
         Handshake => 0x16,
@@ -175,9 +173,8 @@ enum_builder! {
 enum_builder! {
     /// The `ProtocolVersion` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     #[repr(u16)]
-    pub enum ProtocolVersion {
+    pub enum ProtocolVersion names ProtocolVersionNames {
         SSLv2 => 0x0002,
         SSLv3 => 0x0300,
         TLSv1_0 => 0x0301,
@@ -196,7 +193,7 @@ enum_builder! {
     ///
     /// [RFC8879]: https://www.rfc-editor.org/rfc/rfc8879.html#section-7.3
     #[repr(u16)]
-    pub enum CertificateCompressionAlgorithm {
+    pub enum CertificateCompressionAlgorithm names CertificateCompressionAlgorithmNames {
         Zlib => 1,
         Brotli => 2,
         Zstd => 3,
@@ -210,11 +207,15 @@ enum_builder! {
     /// [RFC 6091 Section 5]: <https://datatracker.ietf.org/doc/html/rfc6091#section-5>
     /// [RFC 7250 Section 7]: <https://datatracker.ietf.org/doc/html/rfc7250#section-7>
     #[repr(u8)]
-    #[derive(Default)]
-    pub enum CertificateType {
-        #[default]
+    pub enum CertificateType names CertificateTypeNames {
         X509 => 0x00,
         RawPublicKey => 0x02,
+    }
+}
+
+impl Default for CertificateType {
+    fn default() -> Self {
+        Self::X509
     }
 }
 
@@ -225,7 +226,7 @@ enum_builder! {
     ///
     /// [RFC 9849 Section 5]: <https://datatracker.ietf.org/doc/html/rfc9849#section-5>
     #[repr(u8)]
-    pub enum EchClientHelloType {
+    pub enum EchClientHelloType names EchClientHelloTypeNames {
         ClientHelloOuter => 0,
         ClientHelloInner => 1
     }

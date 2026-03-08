@@ -525,15 +525,14 @@ pub struct CompletedKeyExchange {
 enum_builder! {
     /// The `NamedGroup` TLS protocol enum.  Values in this enum are taken
     /// from the various RFCs covering TLS, and are listed by IANA.
-    /// The `Unknown` item is used when processing unrecognized ordinals.
     ///
     /// This enum is used for recognizing key exchange groups advertised
     /// by a peer during a TLS handshake. It is **not** a list of groups that
     /// Rustls supports. The supported groups are determined via the
     /// [`CryptoProvider`][crate::crypto::CryptoProvider] interface.
     #[repr(u16)]
-    #[expect(non_camel_case_types)]
-    pub enum NamedGroup {
+    #[allow(non_camel_case_types)]
+    pub enum NamedGroup names NamedGroupNames {
         secp256r1 => 0x0017,
         secp384r1 => 0x0018,
         secp521r1 => 0x0019,
@@ -581,7 +580,7 @@ impl NamedGroup {
         match version {
             ProtocolVersion::TLSv1_3 => true,
             _ => !matches!(
-                self,
+                *self,
                 Self::MLKEM512
                     | Self::MLKEM768
                     | Self::MLKEM1024

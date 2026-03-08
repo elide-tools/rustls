@@ -4,7 +4,7 @@ macro_rules! enum_builder {
         $(#[doc = $comment:literal])*
         #[repr($uint:ty)]
         $(#[$metas:meta])*
-        $enum_vis:vis enum $enum_name:ident
+        $enum_vis:vis enum $value_name:ident names $enum_name:ident
         {
           $(
               $(#[$enum_metas:meta])*
@@ -23,10 +23,71 @@ macro_rules! enum_builder {
     ) => {
         $(#[doc = $comment])*
         $(#[$metas])*
-        #[allow(missing_docs)]
+        #[allow(missing_docs, clippy::exhaustive_structs)]
+        #[derive(PartialEq, Eq, Clone, Copy, Hash)]
+        $enum_vis struct $value_name($enum_vis $uint);
+
+        #[allow(missing_docs, non_upper_case_globals, clippy::upper_case_acronyms)]
+        impl $value_name {
+            /// Encode the value as a big-endian byte array.
+            // NOTE(allow) generated irrespective if there are callers
+            #[allow(dead_code)]
+            $enum_vis fn to_array(self) -> [u8; core::mem::size_of::<$uint>()] {
+                self.0.to_be_bytes()
+            }
+
+            $(
+               $(#[$enum_metas])*
+               $enum_vis const $enum_var: Self = Self($enum_val);
+            )*
+            $(
+                $(
+                    $(#[$enum_metas_no_debug])*
+                    $enum_vis const $enum_var_no_debug: Self = Self($enum_val_no_debug);
+                )*
+            )?
+        }
+
+        impl crate::msgs::Codec<'_> for $value_name {
+            fn encode(&self, bytes: &mut alloc::vec::Vec<u8>) {
+                self.0.encode(bytes);
+            }
+
+            fn read(r: &mut crate::msgs::Reader<'_>) -> Result<Self, crate::error::InvalidMessage> {
+                match <$uint>::read(r) {
+                    Ok(x) => Ok(Self(x)),
+                    Err(_) => Err(crate::error::InvalidMessage::MissingData(stringify!($value_name))),
+                }
+            }
+        }
+
+        impl core::fmt::Debug for $value_name {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                match $enum_name::try_from(*self) {
+                    Ok(known) => known.fmt(f),
+                    Err(unknown) => write!(f, "0x{:x?}", unknown.0),
+                }
+            }
+        }
+
+        impl From<$uint> for $value_name {
+            fn from(x: $uint) -> Self {
+                Self(x)
+            }
+        }
+
+        impl From<$value_name> for $uint {
+            fn from(x: $value_name) -> Self {
+                x.0
+            }
+        }
+
+        $(#[doc = $comment])*
+        $(#[$metas])*
+        #[allow(missing_docs, clippy::upper_case_acronyms)]
         #[non_exhaustive]
         #[derive(PartialEq, Eq, Clone, Copy, Hash)]
-        $enum_vis enum $enum_name {
+        pub(crate) enum $enum_name {
             $(
                 $(#[$enum_metas])*
                 $enum_var
@@ -38,58 +99,22 @@ macro_rules! enum_builder {
                     $enum_var_no_debug
                 ),*
             )?
-            ,Unknown($uint)
         }
 
-        #[allow(missing_docs)]
-        impl $enum_name {
-            // NOTE(allow) generated irrespective if there are callers
-            #[allow(dead_code)]
-            $enum_vis fn to_array(self) -> [u8; core::mem::size_of::<$uint>()] {
-                <$uint>::from(self).to_be_bytes()
-            }
-
-            // NOTE(allow) generated irrespective if there are callers
-            #[allow(dead_code)]
-            $enum_vis fn as_str(&self) -> Option<&'static str> {
-                match self {
-                    $( $enum_name::$enum_var => Some(stringify!($enum_var))),*
-                    $(, $( $enum_name::$enum_var_no_debug => Some(stringify!($enum_var_no_debug))),* )?
-                    ,$enum_name::Unknown(_) => None,
+        impl TryFrom<$value_name> for $enum_name {
+            type Error = $value_name;
+            fn try_from(value: $value_name) -> Result<Self, Self::Error> {
+                match value.0 {
+                    $($enum_val => Ok(Self::$enum_var), )*
+                    $($($enum_val_no_debug => Ok(Self::$enum_var_no_debug),)* )?
+                    _ => Err(value),
                 }
             }
         }
 
-        impl crate::msgs::Codec<'_> for $enum_name {
-            fn encode(&self, bytes: &mut alloc::vec::Vec<u8>) {
-                <$uint>::from(*self).encode(bytes);
-            }
-
-            fn read(r: &mut crate::msgs::Reader<'_>) -> Result<Self, crate::error::InvalidMessage> {
-                match <$uint>::read(r) {
-                    Ok(x) => Ok($enum_name::from(x)),
-                    Err(_) => Err(crate::error::InvalidMessage::MissingData(stringify!($enum_name))),
-                }
-            }
-        }
-
-        impl From<$uint> for $enum_name {
-            fn from(x: $uint) -> Self {
-                match x {
-                    $($enum_val => $enum_name::$enum_var),*
-                    $(, $($enum_val_no_debug => $enum_name::$enum_var_no_debug),* )?
-                    , x => $enum_name::Unknown(x),
-                }
-            }
-        }
-
-        impl From<$enum_name> for $uint {
-            fn from(value: $enum_name) -> Self {
-                match value {
-                    $( $enum_name::$enum_var => $enum_val),*
-                    $(, $( $enum_name::$enum_var_no_debug => $enum_val_no_debug),* )?
-                    ,$enum_name::Unknown(x) => x
-                }
+        impl From<$enum_name> for $value_name {
+            fn from(x: $enum_name) -> Self {
+                $value_name(x as $uint)
             }
         }
 
@@ -97,7 +122,7 @@ macro_rules! enum_builder {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                 match self {
                     $( $enum_name::$enum_var => f.write_str(stringify!($enum_var)), )*
-                    _ => write!(f, "{}(0x{:x?})", stringify!($enum_name), <$uint>::from(*self)),
+                    $( $($enum_name::$enum_var_no_debug => $value_name::from(*self).fmt(f), )* )?
                 }
             }
         }
