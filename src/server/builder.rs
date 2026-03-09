@@ -98,6 +98,31 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
         Ok(self.with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key))))
     }
 
+    /// Sets a single certificate chain, matching private key, optional OCSP
+    /// response, and optional SCT list (RFC 6962).
+    ///
+    /// `cert_chain` is a vector of DER-encoded certificates.
+    /// `key_der` is a DER-encoded private key as PKCS#1, PKCS#8, or SEC1.
+    /// `ocsp` is a DER-encoded OCSP response. Ignored if zero length.
+    /// `sct_list` is a DER-encoded `SignedCertificateTimestampList`. Ignored if zero length.
+    pub fn with_single_cert_with_ocsp_and_scts(
+        self,
+        cert_chain: Vec<CertificateDer<'static>>,
+        key_der: PrivateKeyDer<'static>,
+        ocsp: Vec<u8>,
+        sct_list: Vec<u8>,
+    ) -> Result<ServerConfig, Error> {
+        let mut certified_key =
+            CertifiedKey::from_der(cert_chain, key_der, self.crypto_provider())?;
+        if !ocsp.is_empty() {
+            certified_key.ocsp = Some(ocsp);
+        }
+        if !sct_list.is_empty() {
+            certified_key.sct_list = Some(sct_list);
+        }
+        Ok(self.with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key))))
+    }
+
     /// Sets a custom [`ResolvesServerCert`].
     pub fn with_cert_resolver(self, cert_resolver: Arc<dyn ResolvesServerCert>) -> ServerConfig {
         ServerConfig {

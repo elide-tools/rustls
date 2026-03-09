@@ -146,6 +146,10 @@ pub struct CertifiedKey {
     /// An optional OCSP response from the certificate issuer,
     /// attesting to its continued validity.
     pub ocsp: Option<Vec<u8>>,
+
+    /// An optional DER-encoded `SignedCertificateTimestampList` (RFC 6962)
+    /// to be delivered via the `signed_certificate_timestamp` TLS extension.
+    pub sct_list: Option<Vec<u8>>,
 }
 
 impl CertifiedKey {
@@ -182,6 +186,7 @@ impl CertifiedKey {
             cert,
             key,
             ocsp: None,
+            sct_list: None,
         }
     }
 

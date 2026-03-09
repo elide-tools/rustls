@@ -218,6 +218,24 @@ impl ExtensionProcessing {
         }
     }
 
+    /// Process SCT list for TLS 1.2 ServerHello extension delivery.
+    #[cfg(feature = "tls12")]
+    pub(super) fn process_tls12_scts(
+        &mut self,
+        hello: &ClientHelloPayload,
+        sct_list: Option<&[u8]>,
+    ) {
+        use crate::msgs::base::PayloadU16;
+
+        // In TLS 1.2, SCTs are delivered via a ServerHello extension.
+        // We include them whenever available (most implementations do
+        // not require the client to explicitly request SCTs).
+        let _ = hello; // reserved for future client-request checking
+        if let Some(scts) = sct_list {
+            self.extensions.sct_list = Some(PayloadU16::new(scts.to_vec()));
+        }
+    }
+
     fn validate_server_cert_type_extension(
         &mut self,
         hello: &ClientHelloPayload,

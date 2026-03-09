@@ -1176,6 +1176,10 @@ extension_struct! {
         ExtensionType::StatusRequest =>
             pub(crate) certificate_status_request_ack: Option<()>,
 
+        /// Signed Certificate Timestamps (RFC 6962, TLS 1.2 ServerHello delivery)
+        ExtensionType::SCT =>
+            pub(crate) sct_list: Option<PayloadU16>,
+
         /// Selected TLS version (RFC8446)
         ExtensionType::SupportedVersions =>
             pub(crate) selected_version: Option<ProtocolVersion>,
@@ -1214,6 +1218,7 @@ impl ServerExtensions<'_> {
             server_certificate_type,
             extended_master_secret_ack,
             certificate_status_request_ack,
+            sct_list,
             selected_version,
             transport_parameters,
             transport_parameters_draft,
@@ -1233,6 +1238,7 @@ impl ServerExtensions<'_> {
             server_certificate_type,
             extended_master_secret_ack,
             certificate_status_request_ack,
+            sct_list,
             selected_version,
             transport_parameters: transport_parameters.map(|x| x.into_owned()),
             transport_parameters_draft: transport_parameters_draft.map(|x| x.into_owned()),
@@ -1676,6 +1682,10 @@ extension_struct! {
     pub(crate) struct CertificateExtensions<'a> {
         ExtensionType::StatusRequest =>
             pub(crate) status: Option<CertificateStatus<'a>>,
+
+        /// Signed Certificate Timestamps (RFC 6962)
+        ExtensionType::SCT =>
+            pub(crate) sct_list: Option<PayloadU16>,
     }
 }
 
@@ -1683,6 +1693,7 @@ impl CertificateExtensions<'_> {
     fn into_owned(self) -> CertificateExtensions<'static> {
         CertificateExtensions {
             status: self.status.map(|s| s.into_owned()),
+            sct_list: self.sct_list,
         }
     }
 }
@@ -1780,21 +1791,34 @@ impl<'a> CertificatePayloadTls13<'a> {
         certs: impl Iterator<Item = &'a CertificateDer<'a>>,
         ocsp_response: Option<&'a [u8]>,
     ) -> Self {
+        Self::new_with_scts(certs, ocsp_response, None)
+    }
+
+    pub(crate) fn new_with_scts(
+        certs: impl Iterator<Item = &'a CertificateDer<'a>>,
+        ocsp_response: Option<&'a [u8]>,
+        sct_list: Option<&'a [u8]>,
+    ) -> Self {
         Self {
             context: PayloadU8::empty(),
             entries: certs
-                // zip certificate iterator with `ocsp_response` followed by
-                // an infinite-length iterator of `None`.
                 .zip(
                     ocsp_response
                         .into_iter()
                         .map(Some)
                         .chain(iter::repeat(None)),
                 )
-                .map(|(cert, ocsp)| {
+                .enumerate()
+                .map(|(i, (cert, ocsp))| {
                     let mut e = CertificateEntry::new(cert.clone());
                     if let Some(ocsp) = ocsp {
                         e.extensions.status = Some(CertificateStatus::new(ocsp));
+                    }
+                    // SCT list is only attached to the leaf (end-entity) certificate
+                    if i == 0 {
+                        if let Some(scts) = sct_list {
+                            e.extensions.sct_list = Some(PayloadU16::new(scts.to_vec()));
+                        }
                     }
                     e
                 })
@@ -1828,6 +1852,18 @@ impl<'a> CertificatePayloadTls13<'a> {
                     .clone()
                     .into_vec()
             })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn end_entity_scts(&self) -> Vec<u8> {
+        let Some(entry) = self.entries.first() else {
+            return vec![];
+        };
+        entry
+            .extensions
+            .sct_list
+            .as_ref()
+            .map(|sct_list| sct_list.0.to_vec())
             .unwrap_or_default()
     }
 

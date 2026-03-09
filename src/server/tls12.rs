@@ -173,6 +173,7 @@ mod client_hello {
             }
 
             let mut ocsp_response = server_key.get_ocsp();
+            let sct_list = server_key.get_sct_list();
 
             // If we're not offered a ticket or a potential session ID, allocate a session ID.
             if !self.config.session_storage.can_cache() {
@@ -198,6 +199,7 @@ mod client_hello {
                 None,
                 &self.randoms,
                 self.extra_exts,
+                sct_list,
             )?;
             emit_certificate(&mut flight, server_key.get_cert());
             if let Some(ocsp_response) = ocsp_response {
@@ -271,6 +273,7 @@ mod client_hello {
                 Some(&resumedata),
                 &self.randoms,
                 self.extra_exts,
+                None, // No SCTs on resumption
             )?;
             flight.finish(cx.common);
 
@@ -331,10 +334,12 @@ mod client_hello {
         resumedata: Option<&persist::ServerSessionValue>,
         randoms: &ConnectionRandoms,
         extra_exts: ServerExtensionsInput<'static>,
+        sct_list: Option<&[u8]>,
     ) -> Result<bool, Error> {
         let mut ep = hs::ExtensionProcessing::new(extra_exts);
         ep.process_common(config, cx, ocsp_response, hello, resumedata)?;
         ep.process_tls12(config, hello, using_ems);
+        ep.process_tls12_scts(hello, sct_list);
 
         let sh = HandshakeMessagePayload(HandshakePayload::ServerHello(ServerHelloPayload {
             legacy_version: ProtocolVersion::TLSv1_2,

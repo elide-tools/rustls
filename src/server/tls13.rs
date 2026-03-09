@@ -365,6 +365,7 @@ mod client_hello {
             }
 
             let mut ocsp_response = server_key.get_ocsp();
+            let sct_list = server_key.get_sct_list();
             let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
             let doing_early_data = emit_encrypted_extensions(
                 &mut flight,
@@ -386,10 +387,11 @@ mod client_hello {
                         &self.config,
                         server_key.get_cert(),
                         ocsp_response,
+                        sct_list,
                         compressor,
                     );
                 } else {
-                    emit_certificate_tls13(&mut flight, server_key.get_cert(), ocsp_response);
+                    emit_certificate_tls13(&mut flight, server_key.get_cert(), ocsp_response, sct_list);
                 }
                 emit_certificate_verify_tls13(
                     &mut flight,
@@ -733,9 +735,10 @@ mod client_hello {
         flight: &mut HandshakeFlightTls13<'_>,
         cert_chain: &[CertificateDer<'static>],
         ocsp_response: Option<&[u8]>,
+        sct_list: Option<&[u8]>,
     ) {
         let cert = HandshakeMessagePayload(HandshakePayload::CertificateTls13(
-            CertificatePayloadTls13::new(cert_chain.iter(), ocsp_response),
+            CertificatePayloadTls13::new_with_scts(cert_chain.iter(), ocsp_response, sct_list),
         ));
 
         trace!("sending certificate {cert:?}");
@@ -747,15 +750,17 @@ mod client_hello {
         config: &ServerConfig,
         cert_chain: &[CertificateDer<'static>],
         ocsp_response: Option<&[u8]>,
+        sct_list: Option<&[u8]>,
         cert_compressor: &'static dyn CertCompressor,
     ) {
-        let payload = CertificatePayloadTls13::new(cert_chain.iter(), ocsp_response);
+        let payload =
+            CertificatePayloadTls13::new_with_scts(cert_chain.iter(), ocsp_response, sct_list);
 
         let Ok(entry) = config
             .cert_compression_cache
             .compression_for(cert_compressor, &payload)
         else {
-            return emit_certificate_tls13(flight, cert_chain, ocsp_response);
+            return emit_certificate_tls13(flight, cert_chain, ocsp_response, sct_list);
         };
 
         let c = HandshakeMessagePayload(HandshakePayload::CompressedCertificate(

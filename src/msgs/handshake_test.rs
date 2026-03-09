@@ -836,6 +836,7 @@ fn sample_server_hello_payload() -> ServerHelloPayload {
             }),
             extended_master_secret_ack: Some(()),
             certificate_status_request_ack: Some(()),
+            sct_list: None,
             selected_version: Some(ProtocolVersion::TLSv1_2),
             transport_parameters: Some(Payload::new(vec![1, 2, 3])),
             transport_parameters_draft: None,
@@ -961,6 +962,7 @@ fn sample_certificate_payload_tls13() -> CertificatePayloadTls13<'static> {
                 status: Some(CertificateStatus {
                     ocsp_response: PayloadU24(Payload::new(vec![1, 2, 3])),
                 }),
+                sct_list: None,
             },
         }],
     }
