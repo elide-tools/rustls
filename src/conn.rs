@@ -17,7 +17,7 @@ use crate::msgs::deframer::handshake::HandshakeDeframer;
 use crate::msgs::handshake::Random;
 use crate::msgs::message::{InboundPlainMessage, Message, MessagePayload};
 use crate::record_layer::Decrypted;
-use crate::suites::ExtractedSecrets;
+use crate::suites::{ExtractedSecrets, SupportedCipherSuite};
 use crate::vecbuf::ChunkVecBuffer;
 
 // pub so that it can be re-exported from the crate root
@@ -473,6 +473,59 @@ impl<Data> ConnectionCommon<Data> {
         self.core.dangerous_extract_secrets()
     }
 
+    /// Inject previously-extracted secrets into this connection, enabling
+    /// TLS connection migration.
+    ///
+    /// This is the inverse of [`Self::dangerous_extract_secrets`]. It takes
+    /// an [`ExtractedSecrets`] (obtained from a prior connection) along with
+    /// the cipher suite that was negotiated, and configures this connection's
+    /// record layer to encrypt/decrypt using those keys and sequence numbers.
+    ///
+    /// # Safety contract
+    /// - The caller must ensure the secrets match the cipher suite.
+    /// - The caller must ensure sequence numbers are correct — wrong
+    ///   sequence numbers will cause decryption failures.
+    /// - `enable_secret_extraction` must have been set on the config used to
+    ///   create this connection.
+    /// - The connection should not have completed a handshake of its own;
+    ///   this is meant for fresh connections that will be used as
+    ///   "resumed from migration" transports.
+    pub fn dangerous_inject_secrets(
+        &mut self,
+        secrets: ExtractedSecrets,
+        suite: SupportedCipherSuite,
+    ) -> Result<(), Error> {
+        let cs = &self.core.common_state;
+        if !cs.enable_secret_extraction {
+            return Err(Error::General("Secret extraction is disabled".into()));
+        }
+
+        let encrypter = suite.encrypter_from_secrets(&secrets.tx.1);
+        let decrypter = suite.decrypter_from_secrets(&secrets.rx.1);
+
+        let cs = &mut self.core.common_state;
+        cs.record_layer.set_message_encrypter(
+            encrypter,
+            suite.common().confidentiality_limit,
+        );
+        cs.record_layer
+            .set_write_seq(secrets.tx.0);
+
+        cs.record_layer
+            .set_message_decrypter(decrypter);
+        cs.record_layer
+            .set_read_seq(secrets.rx.0);
+        cs.record_layer.set_has_decrypted();
+
+        cs.suite = Some(suite);
+        cs.negotiated_version = Some(suite.version().version);
+        cs.may_send_application_data = true;
+        cs.may_receive_application_data = true;
+        cs.enable_secret_extraction = true;
+
+        Ok(())
+    }
+
     /// Sets a limit on the internal buffers used to buffer
     /// unsent plaintext (prior to completing the TLS handshake)
     /// and unsent TLS records.  This limit acts only on application
@@ -846,6 +899,59 @@ impl<Data> UnbufferedConnectionCommon<Data> {
     /// Should be used with care as it exposes secret key material.
     pub fn dangerous_extract_secrets(self) -> Result<ExtractedSecrets, Error> {
         self.core.dangerous_extract_secrets()
+    }
+
+    /// Inject previously-extracted secrets into this connection's record layer.
+    ///
+    /// This is the unbuffered counterpart of
+    /// [`ConnectionCommon::dangerous_inject_secrets`]. It accepts
+    /// an [`ExtractedSecrets`] (obtained from a prior connection) along with
+    /// the cipher suite that was negotiated, and configures this connection's
+    /// record layer to encrypt/decrypt using those keys and sequence numbers.
+    ///
+    /// # Safety contract
+    /// - The caller must ensure the secrets match the cipher suite.
+    /// - The caller must ensure sequence numbers are correct — wrong
+    ///   sequence numbers will cause decryption failures.
+    /// - `enable_secret_extraction` must have been set on the config used to
+    ///   create this connection.
+    /// - The connection should not have completed a handshake of its own;
+    ///   this is meant for fresh connections that will be used as
+    ///   "resumed from migration" transports.
+    pub fn dangerous_inject_secrets(
+        &mut self,
+        secrets: ExtractedSecrets,
+        suite: SupportedCipherSuite,
+    ) -> Result<(), Error> {
+        let cs = &self.core.common_state;
+        if !cs.enable_secret_extraction {
+            return Err(Error::General("Secret extraction is disabled".into()));
+        }
+
+        let encrypter = suite.encrypter_from_secrets(&secrets.tx.1);
+        let decrypter = suite.decrypter_from_secrets(&secrets.rx.1);
+
+        let cs = &mut self.core.common_state;
+        cs.record_layer.set_message_encrypter(
+            encrypter,
+            suite.common().confidentiality_limit,
+        );
+        cs.record_layer
+            .set_write_seq(secrets.tx.0);
+
+        cs.record_layer
+            .set_message_decrypter(decrypter);
+        cs.record_layer
+            .set_read_seq(secrets.rx.0);
+        cs.record_layer.set_has_decrypted();
+
+        cs.suite = Some(suite);
+        cs.negotiated_version = Some(suite.version().version);
+        cs.may_send_application_data = true;
+        cs.may_receive_application_data = true;
+        cs.enable_secret_extraction = true;
+
+        Ok(())
     }
 }
 

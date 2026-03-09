@@ -222,6 +222,21 @@ impl RecordLayer {
         self.read_seq
     }
 
+    /// Set the write sequence number (for secret injection / connection migration).
+    pub(crate) fn set_write_seq(&mut self, seq: u64) {
+        self.write_seq = seq;
+    }
+
+    /// Set the read sequence number (for secret injection / connection migration).
+    pub(crate) fn set_read_seq(&mut self, seq: u64) {
+        self.read_seq = seq;
+    }
+
+    /// Mark that decryption has occurred (for injected connections that resume mid-stream).
+    pub(crate) fn set_has_decrypted(&mut self) {
+        self.has_decrypted = true;
+    }
+
     pub(crate) fn encrypted_len(&self, payload_len: usize) -> usize {
         self.message_encrypter
             .encrypted_payload_len(payload_len)

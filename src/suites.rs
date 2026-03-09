@@ -1,7 +1,10 @@
+use alloc::boxed::Box;
 use core::fmt;
 
 use crate::common_state::Protocol;
-use crate::crypto::cipher::{AeadKey, Iv};
+use crate::crypto::cipher::{
+    AeadKey, Iv, MessageDecrypter, MessageEncrypter,
+};
 use crate::crypto::{self, KeyExchangeAlgorithm};
 use crate::enums::{CipherSuite, SignatureAlgorithm, SignatureScheme};
 use crate::msgs::handshake::ALL_KEY_EXCHANGE_ALGORITHMS;
@@ -145,6 +148,40 @@ impl SupportedCipherSuite {
         }
     }
 
+    /// Construct a `MessageEncrypter` from extracted `ConnectionTrafficSecrets`.
+    ///
+    /// This is the inverse of `extract_keys` — it takes the key material from
+    /// a `ConnectionTrafficSecrets` and builds the encrypter needed to resume
+    /// encrypting on a migrated connection.
+    pub fn encrypter_from_secrets(
+        &self,
+        secrets: &ConnectionTrafficSecrets,
+    ) -> Box<dyn MessageEncrypter> {
+        let (key, iv) = clone_key_iv(secrets);
+        match self {
+            #[cfg(feature = "tls12")]
+            Self::Tls12(cs) => cs.aead_alg.encrypter(key, iv.as_ref(), &[]),
+            Self::Tls13(cs) => cs.aead_alg.encrypter(key, iv),
+        }
+    }
+
+    /// Construct a `MessageDecrypter` from extracted `ConnectionTrafficSecrets`.
+    ///
+    /// This is the inverse of `extract_keys` — it takes the key material from
+    /// a `ConnectionTrafficSecrets` and builds the decrypter needed to resume
+    /// decrypting on a migrated connection.
+    pub fn decrypter_from_secrets(
+        &self,
+        secrets: &ConnectionTrafficSecrets,
+    ) -> Box<dyn MessageDecrypter> {
+        let (key, iv) = clone_key_iv(secrets);
+        match self {
+            #[cfg(feature = "tls12")]
+            Self::Tls12(cs) => cs.aead_alg.decrypter(key, iv.as_ref()),
+            Self::Tls13(cs) => cs.aead_alg.decrypter(key, iv),
+        }
+    }
+
     /// Return the list of `KeyExchangeAlgorithm`s supported by this cipher suite.
     ///
     /// TLS 1.3 cipher suites support both ECDHE and DHE key exchange, but TLS 1.2 suites
@@ -241,6 +278,22 @@ pub enum ConnectionTrafficSecrets {
     },
 }
 
+/// Clone the key and IV out of a `ConnectionTrafficSecrets` variant.
+fn clone_key_iv(secrets: &ConnectionTrafficSecrets) -> (AeadKey, Iv) {
+    match secrets {
+        ConnectionTrafficSecrets::Aes128Gcm { key, iv }
+        | ConnectionTrafficSecrets::Aes256Gcm { key, iv }
+        | ConnectionTrafficSecrets::Chacha20Poly1305 { key, iv } => {
+            let key_bytes = key.as_ref();
+            let mut key_buf = [0u8; AeadKey::MAX_LEN];
+            key_buf[..key_bytes.len()].copy_from_slice(key_bytes);
+            let new_key = AeadKey::from(key_buf).with_length(key_bytes.len());
+            let iv_bytes: [u8; 12] = iv.as_ref().try_into().unwrap();
+            (new_key, Iv::from(iv_bytes))
+        }
+    }
+}
+
 #[cfg(test)]
 #[macro_rules_attribute::apply(test_for_each_provider)]
 mod tests {
@@ -269,5 +322,71 @@ mod tests {
                 .can_resume_from(TLS13_CHACHA20_POLY1305_SHA256_INTERNAL)
                 .is_none()
         );
+    }
+
+    /// Test that encrypt → extract_keys → inject (encrypter/decrypter_from_secrets)
+    /// → decrypt round-trips correctly for TLS 1.3 cipher suites.
+    #[test]
+    fn test_inject_secrets_round_trip() {
+        use crate::crypto::cipher::{
+            AeadKey, InboundOpaqueMessage, Iv,
+            OutboundChunks, OutboundPlainMessage, NONCE_LEN,
+        };
+        use crate::enums::{ContentType, ProtocolVersion};
+
+        let suite = TLS13_AES_128_GCM_SHA256;
+        let tls13 = suite.tls13().unwrap();
+
+        // Create a key and IV
+        let key_bytes = [0x42u8; 16];
+        let iv_bytes = [0x07u8; NONCE_LEN];
+        let make_key = || {
+            let mut buf = [0u8; AeadKey::MAX_LEN];
+            buf[..16].copy_from_slice(&key_bytes);
+            AeadKey::from(buf).with_length(16)
+        };
+        let make_iv = || Iv::from(iv_bytes);
+
+        // Extract keys to get ConnectionTrafficSecrets
+        let secrets = tls13
+            .aead_alg
+            .extract_keys(make_key(), make_iv())
+            .unwrap();
+
+        // Build encrypter from original key material
+        let mut encrypter = tls13.aead_alg.encrypter(make_key(), make_iv());
+
+        // Encrypt a message at sequence number 5
+        let plaintext = b"hello world from migrated connection";
+        let encrypted = encrypter
+            .encrypt(
+                OutboundPlainMessage {
+                    typ: ContentType::ApplicationData,
+                    version: ProtocolVersion::TLSv1_2,
+                    payload: OutboundChunks::Single(&plaintext[..]),
+                },
+                5,
+            )
+            .unwrap();
+
+        // Now reconstruct decrypter from the extracted secrets (simulating injection)
+        let mut decrypter = suite.decrypter_from_secrets(&secrets);
+
+        // Decrypt the message at the same sequence number
+        let encoded = encrypted.encode();
+        // The encoded TLS record: 5-byte header + ciphertext payload
+        let mut ciphertext = encoded[5..].to_vec();
+        let decrypted = decrypter
+            .decrypt(
+                InboundOpaqueMessage::new(
+                    ContentType::ApplicationData,
+                    ProtocolVersion::TLSv1_2,
+                    &mut ciphertext,
+                ),
+                5,
+            )
+            .unwrap();
+
+        assert_eq!(decrypted.payload, &plaintext[..]);
     }
 }
