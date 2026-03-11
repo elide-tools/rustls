@@ -578,7 +578,6 @@ impl EarlyData {
         matches!(self.state, EarlyDataState::Ready | EarlyDataState::Accepted)
     }
 
-    #[cfg(feature = "std")]
     fn is_accepted(&self) -> bool {
         matches!(
             self.state,
@@ -866,7 +865,6 @@ impl ConnectionCore<ClientConnectionData> {
         Ok(Self::new(state, data, common_state))
     }
 
-    #[cfg(feature = "std")]
     pub(crate) fn is_early_data_accepted(&self) -> bool {
         self.data.early_data.is_accepted()
     }
@@ -946,6 +944,15 @@ impl UnbufferedClientConnection {
     /// Returns the number of TLS1.3 tickets that have been received.
     pub fn tls13_tickets_received(&self) -> u32 {
         self.inner.tls13_tickets_received
+    }
+
+    /// Check if early data was accepted by the server.
+    ///
+    /// If you sent early data and this returns false at the end of the
+    /// handshake then the server will not process the data. This
+    /// is not an error, but you may wish to resend the data.
+    pub fn is_early_data_accepted(&self) -> bool {
+        self.inner.core.is_early_data_accepted()
     }
 }
 
