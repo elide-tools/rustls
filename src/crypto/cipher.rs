@@ -300,6 +300,28 @@ impl AeadKey {
         key
     }
 
+    /// Construct an `AeadKey` from an arbitrary-length byte slice.
+    ///
+    /// This is the public counterpart of the `pub(crate)` `new()` method,
+    /// exposed for use cases like connection migration where AEAD keys must
+    /// be reconstructed from serialized bytes without relying on internal
+    /// layout assumptions.
+    ///
+    /// # Panics
+    /// Panics if `bytes.len() > AeadKey::MAX_LEN` (32).
+    pub fn from_slice(bytes: &[u8]) -> Self {
+        assert!(
+            bytes.len() <= Self::MAX_LEN,
+            "AeadKey::from_slice: key too long ({} > {})",
+            bytes.len(),
+            Self::MAX_LEN,
+        );
+        let mut key = Self::from([0u8; Self::MAX_LEN]);
+        key.buf[..bytes.len()].copy_from_slice(bytes);
+        key.used = bytes.len();
+        key
+    }
+
     pub(crate) fn with_length(self, len: usize) -> Self {
         assert!(len <= self.used);
         Self {
