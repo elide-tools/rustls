@@ -116,8 +116,18 @@ pub(super) fn handle_server_hello(
             )
         })?;
 
+    let mut using_external_psk = false;
     let key_schedule_pre_handshake = match (server_hello.preshared_key, early_data_key_schedule) {
         (Some(selected_psk), Some(early_key_schedule)) => {
+            if selected_psk != 0 {
+                return Err({
+                    cx.common.send_fatal_alert(
+                        AlertDescription::IllegalParameter,
+                        PeerMisbehaved::SelectedInvalidPsk,
+                    )
+                });
+            }
+
             match &resuming_session {
                 Some(resuming) => {
                     let Some(resuming_suite) = suite.can_resume_from(resuming.suite()) else {
@@ -140,23 +150,46 @@ pub(super) fn handle_server_hello(
                         });
                     }
 
-                    if selected_psk != 0 {
-                        return Err({
-                            cx.common.send_fatal_alert(
-                                AlertDescription::IllegalParameter,
-                                PeerMisbehaved::SelectedInvalidPsk,
-                            )
-                        });
-                    }
-
                     debug!("Resuming using PSK");
                     // The key schedule has been initialized and set in fill_in_psk_binder()
                 }
                 _ => {
-                    return Err(PeerMisbehaved::SelectedUnofferedPsk.into());
+                    // No resuming session -- this must be an external PSK.
+                    // Verify the client had a PSK resolver configured.
+                    if config.psk_resolver.is_none() {
+                        return Err(PeerMisbehaved::SelectedUnofferedPsk.into());
+                    }
+                    // RFC 8446 §4.2.11: "the server selected a cipher suite
+                    // indicating a Hash associated with the PSK"
+                    let psk_hash_len = early_key_schedule
+                        .suite()
+                        .common
+                        .hash_provider
+                        .output_len();
+                    if suite.common.hash_provider.output_len() != psk_hash_len {
+                        return Err({
+                            cx.common.send_fatal_alert(
+                                AlertDescription::IllegalParameter,
+                                PeerMisbehaved::SelectedUnofferedPsk,
+                            )
+                        });
+                    }
+                    using_external_psk = true;
+                    debug!("Using external PSK");
                 }
             }
             KeySchedulePreHandshake::from(early_key_schedule)
+        }
+        // Server claims PSK was selected but we never offered one.
+        // RFC 8446 §4.2.11: "Clients MUST verify that the server's
+        // selected_identity is within the range supplied by the client"
+        (Some(_), None) => {
+            return Err({
+                cx.common.send_fatal_alert(
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::SelectedUnofferedPsk,
+                )
+            });
         }
         _ => {
             debug!("Not resuming");
@@ -245,6 +278,7 @@ pub(super) fn handle_server_hello(
         transcript,
         key_schedule,
         hello,
+        using_external_psk,
     }))
 }
 
@@ -408,6 +442,62 @@ pub(super) fn prepare_resumption(
     exts.preshared_key_offer = Some(psk_offer);
 }
 
+/// Add an external PSK identity to the ClientHello extensions.
+///
+/// This sets up the `pre_shared_key` extension with the external PSK identity
+/// and an empty binder placeholder (to be filled by `fill_in_external_psk_binder`).
+pub(super) fn prepare_external_psk(
+    suite: &'static Tls13CipherSuite,
+    identity: &[u8],
+    exts: &mut ClientExtensions<'_>,
+) {
+    let binder_len = suite.common.hash_provider.output_len();
+    let binder = vec![0u8; binder_len];
+
+    // External PSKs use obfuscated_ticket_age = 0 (RFC 8446 Section 4.2.11:
+    // "For identities established externally, an obfuscated_ticket_age of 0
+    // SHOULD be used")
+    let psk_identity = PresharedKeyIdentity::new(identity.to_vec(), 0);
+    let psk_offer = PresharedKeyOffer::new(psk_identity, binder);
+    exts.preshared_key_offer = Some(psk_offer);
+}
+
+/// Fill in the binder for an external PSK in the ClientHello.
+///
+/// This is the external PSK counterpart of [`fill_in_psk_binder`].
+/// It uses the `"ext binder"` label instead of `"res binder"`.
+pub(super) fn fill_in_external_psk_binder(
+    suite: &'static Tls13CipherSuite,
+    secret: &[u8],
+    transcript: &HandshakeHashBuffer,
+    hmp: &mut HandshakeMessagePayload<'_>,
+) -> KeyScheduleEarly {
+    let suite_hash = suite.common.hash_provider;
+
+    // The binder is calculated over the clienthello, but doesn't include itself or its
+    // length, or the length of its container.
+    let binder_plaintext = hmp.encoding_for_binder_signing();
+    let handshake_hash = transcript.hash_given(suite_hash, &binder_plaintext);
+
+    let key_schedule = KeyScheduleEarly::new(suite, secret);
+    let real_binder = key_schedule.external_psk_binder_key_and_sign_verify_data(&handshake_hash);
+
+    if let HandshakePayload::ClientHello(ch) = &mut hmp.0 {
+        if let Some(PresharedKeyOffer {
+            binders,
+            identities,
+        }) = &mut ch.preshared_key_offer
+        {
+            debug_assert_eq!(identities.len(), 1);
+            debug_assert_eq!(binders.len(), 1);
+            debug_assert_eq!(binders[0].as_ref().len(), real_binder.as_ref().len());
+            binders[0] = PresharedKeyBinder::from(real_binder.as_ref().to_vec());
+        }
+    };
+
+    key_schedule
+}
+
 pub(super) fn derive_early_traffic_secret(
     key_log: &dyn KeyLog,
     cx: &mut ClientContext<'_>,
@@ -480,6 +570,10 @@ struct ExpectEncryptedExtensions {
     transcript: HandshakeHash,
     key_schedule: KeyScheduleHandshake,
     hello: ClientHelloDetails,
+    /// True when the server accepted an external PSK we offered.
+    /// This changes the expected message flow: the server skips
+    /// Certificate/CertificateVerify and sends Finished directly.
+    using_external_psk: bool,
 }
 
 impl State<ClientConnectionData> for ExpectEncryptedExtensions {
@@ -553,6 +647,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
         }
 
         match self.resuming_session {
+            // Ticket-based resumption: server accepted our resumption PSK.
             Some(resuming_session) => {
                 let was_early_traffic = cx.common.early_traffic;
                 if was_early_traffic {
@@ -595,7 +690,37 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                     ech_retry_configs,
                 }))
             }
-            _ => {
+            // External PSK: server accepted our external PSK.
+            // The server skips Certificate/CertificateVerify and sends
+            // Finished directly after EncryptedExtensions.
+            None if self.using_external_psk => {
+                if exts.early_data_ack.is_some() {
+                    return Err(PeerMisbehaved::EarlyDataExtensionWithoutResumption.into());
+                }
+                cx.common
+                    .handshake_kind
+                    .get_or_insert(HandshakeKind::Full);
+
+                debug!("External PSK accepted, skipping certificate exchange");
+
+                // PSK authentication replaces certificate authentication.
+                let cert_verified = verify::ServerCertVerified::assertion();
+                let sig_verified = verify::HandshakeSignatureValid::assertion();
+                Ok(Box::new(ExpectFinished {
+                    config: self.config,
+                    server_name: self.server_name,
+                    randoms: self.randoms,
+                    suite: self.suite,
+                    transcript: self.transcript,
+                    key_schedule: self.key_schedule,
+                    client_auth: None,
+                    cert_verified,
+                    sig_verified,
+                    ech_retry_configs,
+                }))
+            }
+            // Full handshake: expect certificate exchange.
+            None => {
                 if exts.early_data_ack.is_some() {
                     return Err(PeerMisbehaved::EarlyDataExtensionWithoutResumption.into());
                 }

@@ -55,6 +55,7 @@ mod client_hello {
     use crate::tls13::key_schedule::{
         KeyScheduleEarly, KeyScheduleHandshake, KeySchedulePreHandshake,
     };
+    use crate::crypto::{hash, hmac};
     use crate::verify::DigitallySignedStruct;
 
     #[derive(PartialEq)]
@@ -90,12 +91,14 @@ mod client_hello {
     }
 
     impl CompleteClientHelloHandling {
-        fn check_binder(
+        /// Validate a PSK binder using the given binder-key derivation function.
+        fn check_binder_with(
             &self,
             suite: &'static Tls13CipherSuite,
             client_hello: &Message<'_>,
             psk: &[u8],
             binder: &[u8],
+            derive_binder: fn(&KeyScheduleEarly, &hash::Output) -> hmac::Tag,
         ) -> bool {
             let binder_plaintext = match &client_hello.payload {
                 MessagePayload::Handshake { parsed, encoded } => {
@@ -109,10 +112,41 @@ mod client_hello {
                 .hash_given(binder_plaintext);
 
             let key_schedule = KeyScheduleEarly::new(suite, psk);
-            let real_binder =
-                key_schedule.resumption_psk_binder_key_and_sign_verify_data(&handshake_hash);
+            let real_binder = derive_binder(&key_schedule, &handshake_hash);
 
             ConstantTimeEq::ct_eq(real_binder.as_ref(), binder).into()
+        }
+
+        fn check_binder(
+            &self,
+            suite: &'static Tls13CipherSuite,
+            client_hello: &Message<'_>,
+            psk: &[u8],
+            binder: &[u8],
+        ) -> bool {
+            self.check_binder_with(
+                suite,
+                client_hello,
+                psk,
+                binder,
+                KeyScheduleEarly::resumption_psk_binder_key_and_sign_verify_data,
+            )
+        }
+
+        fn check_external_binder(
+            &self,
+            suite: &'static Tls13CipherSuite,
+            client_hello: &Message<'_>,
+            psk: &[u8],
+            binder: &[u8],
+        ) -> bool {
+            self.check_binder_with(
+                suite,
+                client_hello,
+                psk,
+                binder,
+                KeyScheduleEarly::external_psk_binder_key_and_sign_verify_data,
+            )
         }
 
         fn attempt_tls13_ticket_decryption(
@@ -252,6 +286,9 @@ mod client_hello {
 
             let mut chosen_psk_index = None;
             let mut resumedata = None;
+            // Holds the external PSK secret when matched via psk_resolver.
+            // Wrapped in Zeroizing to clear secret material on drop.
+            let mut external_psk_secret: Option<zeroize::Zeroizing<Vec<u8>>> = None;
 
             if let Some(psk_offer) = &client_hello.preshared_key_offer {
                 // "A client MUST provide a "psk_key_exchange_modes" extension if it
@@ -282,37 +319,76 @@ mod client_hello {
                     ));
                 }
 
-                let now = self.config.current_time()?;
+                // First, try external PSK resolution if a resolver is configured.
+                // External PSKs take priority over ticket-based resumption per
+                // RFC 8446 Section 4.2.11.
+                if let Some(ref psk_resolver) = self.config.psk_resolver {
+                    let suite_hash_len = self.suite.common.hash_provider.output_len();
+                    for (i, psk_id) in psk_offer.identities.iter().enumerate() {
+                        // Skip PSK identities whose binder length doesn't match
+                        // the negotiated suite's hash. This means the client
+                        // computed the binder with a different hash algorithm
+                        // than our suite uses (e.g., PSK uses SHA-256 but we
+                        // negotiated a SHA-384 suite).
+                        if psk_offer.binders[i].as_ref().len() != suite_hash_len {
+                            continue;
+                        }
 
-                for (i, psk_id) in psk_offer.identities.iter().enumerate() {
-                    let maybe_resume_data = self
-                        .attempt_tls13_ticket_decryption(&psk_id.identity.0)
-                        .map(|resumedata| {
-                            resumedata.set_freshness(psk_id.obfuscated_ticket_age, now)
-                        })
-                        .filter(|resumedata| {
-                            hs::can_resume(self.suite.into(), &cx.data.sni, false, resumedata)
-                        });
+                        if let Some(secret) = psk_resolver.resolve(&psk_id.identity.0) {
+                            // Validate the binder using the external PSK binder key
+                            if !self.check_external_binder(
+                                self.suite,
+                                chm,
+                                &secret,
+                                psk_offer.binders[i].as_ref(),
+                            ) {
+                                return Err(cx.common.send_fatal_alert(
+                                    AlertDescription::DecryptError,
+                                    PeerMisbehaved::IncorrectBinder,
+                                ));
+                            }
 
-                    let Some(resume) = maybe_resume_data else {
-                        continue;
-                    };
-
-                    if !self.check_binder(
-                        self.suite,
-                        chm,
-                        &resume.master_secret.0,
-                        psk_offer.binders[i].as_ref(),
-                    ) {
-                        return Err(cx.common.send_fatal_alert(
-                            AlertDescription::DecryptError,
-                            PeerMisbehaved::IncorrectBinder,
-                        ));
+                            chosen_psk_index = Some(i);
+                            external_psk_secret = Some(zeroize::Zeroizing::new(secret));
+                            break;
+                        }
                     }
+                }
 
-                    chosen_psk_index = Some(i);
-                    resumedata = Some(resume);
-                    break;
+                // If no external PSK matched, fall back to ticket-based resumption.
+                if external_psk_secret.is_none() {
+                    let now = self.config.current_time()?;
+
+                    for (i, psk_id) in psk_offer.identities.iter().enumerate() {
+                        let maybe_resume_data = self
+                            .attempt_tls13_ticket_decryption(&psk_id.identity.0)
+                            .map(|resumedata| {
+                                resumedata.set_freshness(psk_id.obfuscated_ticket_age, now)
+                            })
+                            .filter(|resumedata| {
+                                hs::can_resume(self.suite.into(), &cx.data.sni, false, resumedata)
+                            });
+
+                        let Some(resume) = maybe_resume_data else {
+                            continue;
+                        };
+
+                        if !self.check_binder(
+                            self.suite,
+                            chm,
+                            &resume.master_secret.0,
+                            psk_offer.binders[i].as_ref(),
+                        ) {
+                            return Err(cx.common.send_fatal_alert(
+                                AlertDescription::DecryptError,
+                                PeerMisbehaved::IncorrectBinder,
+                            ));
+                        }
+
+                        chosen_psk_index = Some(i);
+                        resumedata = Some(resume);
+                        break;
+                    }
                 }
             }
 
@@ -322,10 +398,11 @@ mod client_hello {
                 .map(|offer| offer.psk_dhe)
                 .unwrap_or_default()
             {
-                debug!("Client unwilling to resume, PSK_DHE_KE not offered");
+                debug!("Client unwilling to use PSK_DHE_KE");
                 self.send_tickets = 0;
                 chosen_psk_index = None;
                 resumedata = None;
+                external_psk_secret = None;
             } else {
                 self.send_tickets = self.config.send_tls13_tickets;
             }
@@ -337,7 +414,20 @@ mod client_hello {
                     .clone_from(&resume.client_cert_chain);
             }
 
-            let full_handshake = resumedata.is_none();
+            // Determine the PSK to feed into the key schedule.
+            // External PSK takes priority, then resumption ticket PSK.
+            let resuming_psk: Option<&[u8]> = if let Some(ref secret) = external_psk_secret {
+                Some(secret.as_ref())
+            } else {
+                resumedata
+                    .as_ref()
+                    .map(|x| &x.master_secret.0[..])
+            };
+
+            // Whether we need certificate-based authentication.
+            // Both ticket resumption and external PSK skip certificates.
+            let needs_cert_auth = resuming_psk.is_none();
+
             self.transcript.add_message(chm);
             let key_schedule = emit_server_hello(
                 &mut self.transcript,
@@ -347,21 +437,22 @@ mod client_hello {
                 &client_hello.session_id,
                 chosen_share_and_kxg,
                 chosen_psk_index,
-                resumedata
-                    .as_ref()
-                    .map(|x| &x.master_secret.0[..]),
+                resuming_psk,
                 &self.config,
             )?;
             if !self.done_retry {
                 emit_fake_ccs(cx.common);
             }
 
-            if full_handshake {
+            // Report the handshake kind.
+            // External PSK is a full handshake (no prior session is being continued)
+            // but with PSK-based authentication instead of certificates.
+            if resumedata.is_some() {
+                cx.common.handshake_kind = Some(HandshakeKind::Resumed);
+            } else {
                 cx.common
                     .handshake_kind
                     .get_or_insert(HandshakeKind::Full);
-            } else {
-                cx.common.handshake_kind = Some(HandshakeKind::Resumed);
             }
 
             let mut ocsp_response = server_key.get_ocsp();
@@ -378,7 +469,7 @@ mod client_hello {
                 &self.config,
             )?;
 
-            let doing_client_auth = if full_handshake {
+            let doing_client_auth = if needs_cert_auth {
                 let client_auth = emit_certificate_req_tls13(&mut flight, &self.config)?;
 
                 if let Some(compressor) = cert_compressor {

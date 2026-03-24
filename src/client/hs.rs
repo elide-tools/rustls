@@ -37,6 +37,7 @@ use crate::msgs::handshake::{
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist;
 use crate::sync::Arc;
+use crate::tls13::Tls13CipherSuite;
 use crate::tls13::key_schedule::KeyScheduleEarly;
 use crate::verify::ServerCertVerifier;
 
@@ -352,6 +353,44 @@ fn emit_client_hello_for_retry(
     // Do we have a SessionID or ticket cached for this host?
     let tls13_session = prepare_resumption(&input.resuming, &mut exts, suite, cx, config);
 
+    // If no ticket-based resumption is available, try external PSK.
+    // External PSK is not compatible with ECH (the ECH inner hello
+    // transcript handling is not implemented for external PSK binders).
+    let external_psk: Option<(&'static Tls13CipherSuite, zeroize::Zeroizing<Vec<u8>>)> =
+        if tls13_session.is_none() && supported_versions.tls13 && config.ech_mode.is_none() {
+            config
+                .psk_resolver
+                .as_ref()
+                .and_then(|resolver| {
+                    let sni = match &input.server_name {
+                        ServerName::DnsName(dns_name) => Some(dns_name.as_ref()),
+                        _ => None,
+                    };
+                    resolver.resolve(sni)
+                })
+                .and_then(|psk| {
+                    // Find a TLS 1.3 cipher suite whose hash matches the PSK's
+                    // associated hash algorithm (determined by cipher_suite field).
+                    let target_hash_len = crate::psk::expected_hash_len(psk.cipher_suite);
+                    let tls13_suite = config
+                        .provider
+                        .cipher_suites
+                        .iter()
+                        .filter_map(|cs| cs.tls13())
+                        .find(|s| s.common.hash_provider.output_len() == target_hash_len);
+                    tls13_suite.map(|suite| {
+                        tls13::prepare_external_psk(
+                            suite,
+                            &psk.identity,
+                            &mut exts,
+                        );
+                        (suite, psk.secret)
+                    })
+                })
+        } else {
+            None
+        };
+
     // Extensions MAY be randomized
     // but they also need to keep the same order as the previous ClientHello
     exts.order_seed = input.hello.extension_order_seed;
@@ -425,19 +464,25 @@ fn emit_client_hello_for_retry(
 
     let mut chp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp_payload));
 
-    let tls13_early_data_key_schedule = match (ech_state.as_mut(), tls13_session) {
+    let tls13_early_data_key_schedule = match (ech_state.as_mut(), &tls13_session, &external_psk) {
         // If we're performing ECH and resuming, then the PSK binder will have been dealt with
         // separately, and we need to take the early_data_key_schedule computed for the inner hello.
-        (Some(ech_state), Some(tls13_session)) => ech_state
+        (Some(ech_state), Some(tls13_session), _) => ech_state
             .early_data_key_schedule
             .take()
             .map(|schedule| (tls13_session.suite(), schedule)),
 
         // When we're not doing ECH and resuming, then the PSK binder need to be filled in as
         // normal.
-        (_, Some(tls13_session)) => Some((
+        (_, Some(tls13_session), _) => Some((
             tls13_session.suite(),
-            tls13::fill_in_psk_binder(&tls13_session, &transcript_buffer, &mut chp),
+            tls13::fill_in_psk_binder(tls13_session, &transcript_buffer, &mut chp),
+        )),
+
+        // External PSK: fill in the binder using the external PSK binder key.
+        (_, None, Some((suite, secret))) => Some((
+            *suite,
+            tls13::fill_in_external_psk_binder(suite, secret, &transcript_buffer, &mut chp),
         )),
 
         // No early key schedule in other cases.

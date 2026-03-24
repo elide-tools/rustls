@@ -76,6 +76,11 @@ impl KeyScheduleEarly {
         }
     }
 
+    /// The cipher suite this early key schedule was initialized with.
+    pub(crate) fn suite(&self) -> &'static Tls13CipherSuite {
+        self.ks.inner.suite
+    }
+
     pub(crate) fn resumption_psk_binder_key_and_sign_verify_data(
         &self,
         hs_hash: &hash::Output,
@@ -85,6 +90,24 @@ impl KeyScheduleEarly {
             .derive_for_empty_hash(SecretKind::ResumptionPskBinderKey);
         self.ks
             .sign_verify_data(&resumption_psk_binder_key, hs_hash)
+    }
+
+    /// Compute the binder for an external PSK (using the `"ext binder"` label).
+    ///
+    /// This is identical to [`resumption_psk_binder_key_and_sign_verify_data`]
+    /// except it uses `SecretKind::ExternalPskBinderKey` (`"ext binder"`)
+    /// instead of `SecretKind::ResumptionPskBinderKey` (`"res binder"`).
+    ///
+    /// See RFC 8446 Section 7.1.
+    pub(crate) fn external_psk_binder_key_and_sign_verify_data(
+        &self,
+        hs_hash: &hash::Output,
+    ) -> hmac::Tag {
+        let external_psk_binder_key = self
+            .ks
+            .derive_for_empty_hash(SecretKind::ExternalPskBinderKey);
+        self.ks
+            .sign_verify_data(&external_psk_binder_key, hs_hash)
     }
 }
 
@@ -987,6 +1010,7 @@ where
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SecretKind {
     ResumptionPskBinderKey,
+    ExternalPskBinderKey,
     ClientEarlyTrafficSecret,
     ClientHandshakeTrafficSecret,
     ServerHandshakeTrafficSecret,
@@ -1004,6 +1028,7 @@ impl SecretKind {
         use self::SecretKind::*;
         match self {
             ResumptionPskBinderKey => b"res binder",
+            ExternalPskBinderKey => b"ext binder",
             ClientEarlyTrafficSecret => b"c e traffic",
             ClientHandshakeTrafficSecret => b"c hs traffic",
             ServerHandshakeTrafficSecret => b"s hs traffic",
@@ -1257,6 +1282,83 @@ mod tests {
         )
         .unwrap();
         seal_output
+    }
+
+    #[test]
+    fn external_psk_binder_differs_from_resumption() {
+        use super::KeyScheduleEarly;
+
+        let suite = TLS13_CHACHA20_POLY1305_SHA256_INTERNAL;
+        let psk = [0x42u8; 32];
+        let fake_hash = suite.common.hash_provider.hash(&[1, 2, 3]);
+
+        let ks = KeyScheduleEarly::new(suite, &psk);
+        let res_binder = ks.resumption_psk_binder_key_and_sign_verify_data(&fake_hash);
+        let ext_binder = ks.external_psk_binder_key_and_sign_verify_data(&fake_hash);
+
+        // "res binder" and "ext binder" must produce different outputs
+        assert_ne!(res_binder.as_ref(), ext_binder.as_ref());
+    }
+
+    #[test]
+    fn external_psk_binder_deterministic() {
+        use super::KeyScheduleEarly;
+
+        let suite = TLS13_CHACHA20_POLY1305_SHA256_INTERNAL;
+        let psk = [0xABu8; 32];
+        let fake_hash = suite.common.hash_provider.hash(&[4, 5, 6]);
+
+        let ks1 = KeyScheduleEarly::new(suite, &psk);
+        let binder1 = ks1.external_psk_binder_key_and_sign_verify_data(&fake_hash);
+
+        let ks2 = KeyScheduleEarly::new(suite, &psk);
+        let binder2 = ks2.external_psk_binder_key_and_sign_verify_data(&fake_hash);
+
+        // Same inputs must produce same binder
+        assert_eq!(binder1.as_ref(), binder2.as_ref());
+    }
+
+    #[test]
+    fn external_psk_binder_different_psk_different_output() {
+        use super::KeyScheduleEarly;
+
+        let suite = TLS13_CHACHA20_POLY1305_SHA256_INTERNAL;
+        let fake_hash = suite.common.hash_provider.hash(&[7, 8, 9]);
+
+        let ks1 = KeyScheduleEarly::new(suite, &[0x01u8; 32]);
+        let binder1 = ks1.external_psk_binder_key_and_sign_verify_data(&fake_hash);
+
+        let ks2 = KeyScheduleEarly::new(suite, &[0x02u8; 32]);
+        let binder2 = ks2.external_psk_binder_key_and_sign_verify_data(&fake_hash);
+
+        // Different PSKs must produce different binders
+        assert_ne!(binder1.as_ref(), binder2.as_ref());
+    }
+
+    #[test]
+    fn external_psk_binder_different_hash_different_output() {
+        use super::KeyScheduleEarly;
+
+        let suite = TLS13_CHACHA20_POLY1305_SHA256_INTERNAL;
+        let psk = [0xCDu8; 32];
+
+        let hash1 = suite.common.hash_provider.hash(&[1]);
+        let hash2 = suite.common.hash_provider.hash(&[2]);
+
+        let ks1 = KeyScheduleEarly::new(suite, &psk);
+        let binder1 = ks1.external_psk_binder_key_and_sign_verify_data(&hash1);
+
+        let ks2 = KeyScheduleEarly::new(suite, &psk);
+        let binder2 = ks2.external_psk_binder_key_and_sign_verify_data(&hash2);
+
+        // Different transcript hashes must produce different binders
+        assert_ne!(binder1.as_ref(), binder2.as_ref());
+    }
+
+    #[test]
+    fn secret_kind_ext_binder_label() {
+        assert_eq!(SecretKind::ExternalPskBinderKey.to_bytes(), b"ext binder");
+        assert_eq!(SecretKind::ResumptionPskBinderKey.to_bytes(), b"res binder");
     }
 }
 

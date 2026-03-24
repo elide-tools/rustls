@@ -33,6 +33,7 @@ use crate::sync::Arc;
 use crate::time_provider::DefaultTimeProvider;
 use crate::time_provider::TimeProvider;
 use crate::vecbuf::ChunkVecBuffer;
+use crate::psk::ResolvesServerPsk;
 use crate::{
     DistinguishedName, KeyLog, NamedGroup, WantsVersions, compress, sign, verify, versions,
 };
@@ -446,6 +447,24 @@ pub struct ServerConfig {
     ///
     /// [RFC8779]: https://datatracker.ietf.org/doc/rfc8879/
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
+
+    /// Optional external PSK resolver for TLS 1.3.
+    ///
+    /// When set, the server will check client-offered PSK identities
+    /// against this resolver *before* attempting ticket-based resumption.
+    /// If the resolver returns a key for an identity, that key is used
+    /// as the PSK and ticket decryption is skipped.
+    ///
+    /// After a successful external PSK handshake, the server still sends
+    /// [`send_tls13_tickets`](ServerConfig::send_tls13_tickets) worth of
+    /// `NewSessionTicket` messages, enabling the client to use standard
+    /// ticket-based resumption for subsequent connections.
+    ///
+    /// This only applies to TLS 1.3 connections. It is ignored for
+    /// TLS 1.2 connections.
+    ///
+    /// The default is `None` (no external PSK support).
+    pub psk_resolver: Option<Arc<dyn ResolvesServerPsk>>,
 }
 
 impl ServerConfig {

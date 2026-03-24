@@ -29,6 +29,7 @@ use crate::time_provider::TimeProvider;
 use crate::unbuffered::{EncryptError, TransmitTlsData};
 #[cfg(doc)]
 use crate::{DistinguishedName, crypto};
+use crate::psk::ResolvesClientPsk;
 use crate::{KeyLog, WantsVersions, compress, sign, verify, versions};
 
 /// A trait for the ability to store client session data, so that sessions
@@ -281,6 +282,25 @@ pub struct ClientConfig {
 
     /// How to offer Encrypted Client Hello (ECH). The default is to not offer ECH.
     pub(super) ech_mode: Option<EchMode>,
+
+    /// Optional external PSK resolver for TLS 1.3.
+    ///
+    /// When set, the client will call this resolver during ClientHello
+    /// construction. If it returns an [`ExternalPsk`], the identity is
+    /// included in the `pre_shared_key` extension with a binder computed
+    /// using the external PSK binder key (`"ext binder"` label).
+    ///
+    /// External PSK takes priority over ticket-based resumption when
+    /// the resolver returns `Some`.
+    ///
+    /// This only applies to TLS 1.3 connections. It is ignored for
+    /// TLS 1.2 connections.
+    ///
+    /// This is not compatible with ECH ([`EchMode`]). If both are
+    /// configured, external PSK is silently skipped.
+    ///
+    /// The default is `None` (no external PSK support).
+    pub psk_resolver: Option<Arc<dyn ResolvesClientPsk>>,
 }
 
 impl ClientConfig {

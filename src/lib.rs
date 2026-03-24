@@ -438,6 +438,8 @@ mod hash_hs;
 #[cfg(any(feature = "std", feature = "hashbrown"))]
 mod limited_cache;
 mod rand;
+/// External Pre-Shared Key (PSK) support for TLS 1.3.
+pub mod psk;
 mod record_layer;
 #[cfg(feature = "std")]
 mod stream;
@@ -575,6 +577,7 @@ pub use crate::tls12::Tls12CipherSuite;
 pub use crate::tls13::Tls13CipherSuite;
 pub use crate::verify::DigitallySignedStruct;
 pub use crate::versions::{ALL_VERSIONS, DEFAULT_VERSIONS, SupportedProtocolVersion};
+pub use crate::psk::{ExternalPsk, ResolvesClientPsk, ResolvesServerPsk};
 pub use crate::webpki::RootCertStore;
 
 /// Items for use in a client.
