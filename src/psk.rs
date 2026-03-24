@@ -13,6 +13,7 @@
 //!
 //! [RFC 8446 Section 4.2.11]: https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.11
 
+use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -139,6 +140,11 @@ pub struct ExternalPsk {
     ///
     /// [RFC 8446 Section 4.2.11]: https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.11
     pub cipher_suite: CipherSuite,
+
+    /// Whether to use the PSK directly (RFC 8446) or import it (RFC 9258).
+    ///
+    /// Defaults to [`PskMode::Plain`].
+    pub mode: PskMode,
 }
 
 impl ExternalPsk {
@@ -152,6 +158,7 @@ impl ExternalPsk {
             identity,
             secret: Zeroizing::new(secret),
             cipher_suite: CipherSuite::TLS13_AES_128_GCM_SHA256,
+            mode: PskMode::Plain,
         }
     }
 
@@ -167,6 +174,40 @@ impl ExternalPsk {
     pub fn secret(&self) -> &[u8] {
         &self.secret
     }
+
+    /// Enable [RFC 9258] PSK importing with an optional context.
+    ///
+    /// When enabled, the PSK is derived through the importer interface
+    /// before use, and the binder uses the `"imp binder"` label instead
+    /// of `"ext binder"`. Both client and server must agree on whether
+    /// to use imported mode; mismatched modes will cause binder failure.
+    ///
+    /// The `context` is bound into the imported identity and can prevent
+    /// Selfie-style reflection attacks. An empty context is valid.
+    ///
+    /// # Context requirements
+    ///
+    /// Per [RFC 9258 Section 6][ctx], the `context` MUST include the context
+    /// used to derive the EPSK, if any exists. If the EPSK was established
+    /// by another protocol or key exchange, the `context` MUST also include
+    /// a channel binding to that protocol as defined in [RFC 5056].
+    ///
+    /// # Privacy
+    ///
+    /// The `ImportedIdentity.context` is visible in cleartext on the wire as
+    /// part of the PSK identity in the ClientHello. Per [RFC 9258 Section 9],
+    /// unless otherwise protected by a mechanism such as TLS Encrypted
+    /// ClientHello (ECH), applications SHOULD NOT put sensitive information
+    /// in this field.
+    ///
+    /// [RFC 9258]: https://datatracker.ietf.org/doc/html/rfc9258
+    /// [ctx]: https://datatracker.ietf.org/doc/html/rfc9258#section-6
+    /// [RFC 9258 Section 9]: https://datatracker.ietf.org/doc/html/rfc9258#section-9
+    /// [RFC 5056]: https://datatracker.ietf.org/doc/html/rfc5056
+    pub fn with_imported(mut self, context: Vec<u8>) -> Self {
+        self.mode = PskMode::Imported { context };
+        self
+    }
 }
 
 impl fmt::Debug for ExternalPsk {
@@ -175,6 +216,7 @@ impl fmt::Debug for ExternalPsk {
             .field("identity", &self.identity)
             .field("secret", &"[redacted]")
             .field("cipher_suite", &self.cipher_suite)
+            .field("mode", &self.mode)
             .finish()
     }
 }
@@ -187,6 +229,198 @@ pub(crate) fn expected_hash_len(suite: CipherSuite) -> usize {
         CipherSuite::TLS13_AES_256_GCM_SHA384 => 48,
         _ => 32,
     }
+}
+
+/// Whether to use plain external PSK (RFC 8446) or imported PSK (RFC 9258).
+#[derive(Debug, Clone, Default)]
+pub enum PskMode {
+    /// Use the PSK directly with the `"ext binder"` label (RFC 8446 §4.2.11).
+    #[default]
+    Plain,
+    /// Import the PSK per [RFC 9258] before use, with the `"imp binder"` label.
+    ///
+    /// The `context` field is included in the `ImportedIdentity` and can be
+    /// used to bind the PSK to a specific application context, mitigating
+    /// Selfie-style reflection attacks (see [RFC 9258 Appendix A]).
+    ///
+    /// An empty context is valid.
+    ///
+    /// # Key separation (RFC 9258 Section 3)
+    ///
+    /// The same EPSK MUST NOT be used for both [`PskMode::Plain`] and
+    /// [`PskMode::Imported`]. Doing so would defeat the security properties
+    /// that PSK importing is designed to provide. Additionally, each EPSK
+    /// MUST be associated with at most one hash function; do not reuse the
+    /// same EPSK across cipher suites with different hash algorithms.
+    ///
+    /// # Multi-ciphersuite limitation (RFC 9258 Section 5.1)
+    ///
+    /// Per [RFC 9258 Section 5.1], endpoints SHOULD generate a compatible
+    /// `ipskx` for each target cipher suite they offer. The current
+    /// implementation generates only one imported PSK for the first
+    /// matching cipher suite. If the server prefers a cipher suite with
+    /// a different hash algorithm, PSK authentication will not be used
+    /// and the connection will fall back to certificate authentication.
+    ///
+    /// [RFC 9258]: https://datatracker.ietf.org/doc/html/rfc9258
+    /// [RFC 9258 Section 5.1]: https://datatracker.ietf.org/doc/html/rfc9258#section-5.1
+    Imported {
+        /// Application-specific context bound into the imported PSK identity.
+        context: Vec<u8>,
+    },
+}
+
+/// Target KDF identifiers from the IANA "TLS KDF Identifiers" registry
+/// (RFC 9258 Section 10).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TargetKdf {
+    HkdfSha256 = 0x0001,
+    HkdfSha384 = 0x0002,
+}
+
+impl TargetKdf {
+    pub(crate) fn from_cipher_suite(suite: CipherSuite) -> Self {
+        match suite {
+            CipherSuite::TLS13_AES_256_GCM_SHA384 => Self::HkdfSha384,
+            _ => Self::HkdfSha256,
+        }
+    }
+}
+
+/// Serialize an `ImportedIdentity` structure per RFC 9258 Section 5.1.
+///
+/// ```text
+/// struct {
+///     opaque external_identity<1..2^16-1>;
+///     opaque context<0..2^16-1>;
+///     uint16 target_protocol;
+///     uint16 target_kdf;
+/// } ImportedIdentity;
+/// ```
+///
+/// Returns `None` if the serialized `ImportedIdentity` would exceed 2^16-1
+/// (65535) bytes. Per RFC 9258, the PSK importer interface SHOULD reject
+/// any `ImportedIdentity` that exceeds this size, since it must fit within
+/// a PSK identity field.
+pub(crate) fn serialize_imported_identity(
+    external_identity: &[u8],
+    context: &[u8],
+    target_kdf: TargetKdf,
+) -> Option<Vec<u8>> {
+    const TLS13_PROTOCOL_VERSION: u16 = 0x0304;
+    const MAX_IMPORTED_IDENTITY_LEN: usize = 65535;
+
+    let mut out = Vec::with_capacity(
+        2 + external_identity.len() + 2 + context.len() + 2 + 2,
+    );
+    // external_identity<1..2^16-1>
+    out.extend_from_slice(&(external_identity.len() as u16).to_be_bytes());
+    out.extend_from_slice(external_identity);
+    // context<0..2^16-1>
+    out.extend_from_slice(&(context.len() as u16).to_be_bytes());
+    out.extend_from_slice(context);
+    // target_protocol
+    out.extend_from_slice(&TLS13_PROTOCOL_VERSION.to_be_bytes());
+    // target_kdf
+    out.extend_from_slice(&(target_kdf as u16).to_be_bytes());
+
+    if out.len() > MAX_IMPORTED_IDENTITY_LEN {
+        return None;
+    }
+
+    Some(out)
+}
+
+/// Parse an `ImportedIdentity` to extract the external identity.
+///
+/// Returns `(external_identity, context, target_protocol, target_kdf)`
+/// or `None` if the data is malformed.
+pub(crate) fn parse_imported_identity(data: &[u8]) -> Option<(&[u8], &[u8], u16, u16)> {
+    let mut pos = 0;
+
+    // external_identity
+    if data.len() < pos + 2 {
+        return None;
+    }
+    let id_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+    pos += 2;
+    if data.len() < pos + id_len {
+        return None;
+    }
+    let external_identity = &data[pos..pos + id_len];
+    pos += id_len;
+
+    // context
+    if data.len() < pos + 2 {
+        return None;
+    }
+    let ctx_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+    pos += 2;
+    if data.len() < pos + ctx_len {
+        return None;
+    }
+    let context = &data[pos..pos + ctx_len];
+    pos += ctx_len;
+
+    // target_protocol + target_kdf
+    if data.len() < pos + 4 {
+        return None;
+    }
+    let target_protocol = u16::from_be_bytes([data[pos], data[pos + 1]]);
+    pos += 2;
+    let target_kdf = u16::from_be_bytes([data[pos], data[pos + 1]]);
+    pos += 2;
+
+    if pos != data.len() {
+        return None; // trailing data
+    }
+
+    Some((external_identity, context, target_protocol, target_kdf))
+}
+
+/// Derive an imported PSK from an external PSK per RFC 9258 Section 5.1.
+///
+/// ```text
+/// epskx = HKDF-Extract(0, epsk)
+/// ipskx = HKDF-Expand-Label(epskx, "derived psk",
+///                            Hash(ImportedIdentity), L)
+/// ```
+///
+/// Returns `Some((imported_identity, imported_psk))`, or `None` if the
+/// serialized `ImportedIdentity` exceeds the maximum size (2^16-1 bytes).
+pub(crate) fn import_psk(
+    suite: &'static crate::tls13::Tls13CipherSuite,
+    external_identity: &[u8],
+    epsk: &[u8],
+    context: &[u8],
+) -> Option<(Vec<u8>, Zeroizing<Vec<u8>>)> {
+    let target_kdf = TargetKdf::from_cipher_suite(suite.common.suite);
+    let imported_identity = serialize_imported_identity(external_identity, context, target_kdf)?;
+
+    // Hash(ImportedIdentity)
+    let hash_of_identity = suite
+        .common
+        .hash_provider
+        .hash(&imported_identity);
+
+    // epskx = HKDF-Extract(0, epsk)
+    let epskx = suite
+        .hkdf_provider
+        .extract_from_secret(None, epsk);
+
+    // ipskx = HKDF-Expand-Label(epskx, "derived psk", Hash(ImportedIdentity), L)
+    let hash_len = suite.common.hash_provider.output_len();
+    let mut ipskx = Zeroizing::new(vec![0u8; hash_len]);
+    crate::tls13::key_schedule::hkdf_expand_label_slice_9258(
+        epskx.as_ref(),
+        b"derived psk",
+        hash_of_identity.as_ref(),
+        &mut ipskx,
+    )
+    .expect("imported PSK derivation should not exceed HKDF output limit");
+
+    Some((imported_identity, ipskx))
 }
 
 #[cfg(test)]
@@ -664,5 +898,72 @@ mod integration_tests {
 
         assert_eq!(server.handshake_kind(), Some(HandshakeKind::Full));
         assert!(client.peer_certificates().is_some());
+    }
+
+    /// Test that RFC 9258 imported PSK handshake completes successfully.
+    #[test]
+    fn imported_psk_handshake_completes() {
+        let (certs, key, roots) = generate_test_certs();
+
+        let psk_context = b"test-context".to_vec();
+
+        let mut client_config = ClientConfig::builder_with_provider(
+            CryptoProvider::from(sha256_provider()).into(),
+        )
+        .with_protocol_versions(&[&version::TLS13])
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        client_config.psk_resolver = Some(Arc::new(ImportedClientPsk {
+            identity: b"test-id".to_vec(),
+            secret: b"test-secret-32-bytes-long-xxxxx".to_vec(),
+            context: psk_context.clone(),
+        }));
+
+        let mut server_config = ServerConfig::builder_with_provider(
+            CryptoProvider::from(sha256_provider()).into(),
+        )
+        .with_protocol_versions(&[&version::TLS13])
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+        server_config.psk_mode = PskMode::Imported {
+            context: psk_context,
+        };
+        server_config.psk_resolver = Some(Arc::new(FixedServerPsk {
+            identity: b"test-id".to_vec(),
+            secret: b"test-secret-32-bytes-long-xxxxx".to_vec(),
+        }));
+
+        let mut client = ClientConnection::new(
+            Arc::new(client_config),
+            ServerName::try_from("localhost").unwrap(),
+        )
+        .unwrap();
+        let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
+
+        do_handshake(&mut client, &mut server);
+
+        assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+        assert_eq!(server.handshake_kind(), Some(HandshakeKind::Full));
+        assert!(client.peer_certificates().is_none());
+    }
+
+    /// Client resolver that returns imported-mode PSKs.
+    #[derive(Debug)]
+    struct ImportedClientPsk {
+        identity: Vec<u8>,
+        secret: Vec<u8>,
+        context: Vec<u8>,
+    }
+
+    impl ResolvesClientPsk for ImportedClientPsk {
+        fn resolve(&self, _server_name: Option<&str>) -> Option<ExternalPsk> {
+            Some(
+                ExternalPsk::new(self.identity.clone(), self.secret.clone())
+                    .with_imported(self.context.clone()),
+            )
+        }
     }
 }

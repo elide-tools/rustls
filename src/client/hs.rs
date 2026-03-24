@@ -356,7 +356,10 @@ fn emit_client_hello_for_retry(
     // If no ticket-based resumption is available, try external PSK.
     // External PSK is not compatible with ECH (the ECH inner hello
     // transcript handling is not implemented for external PSK binders).
-    let external_psk: Option<(&'static Tls13CipherSuite, zeroize::Zeroizing<Vec<u8>>)> =
+    //
+    // The tuple is (suite, secret, imported) where `imported` indicates
+    // RFC 9258 mode (uses "imp binder" instead of "ext binder").
+    let external_psk: Option<(&'static Tls13CipherSuite, zeroize::Zeroizing<Vec<u8>>, bool)> =
         if tls13_session.is_none() && supported_versions.tls13 && config.ech_mode.is_none() {
             config
                 .psk_resolver
@@ -378,13 +381,34 @@ fn emit_client_hello_for_retry(
                         .iter()
                         .filter_map(|cs| cs.tls13())
                         .find(|s| s.common.hash_provider.output_len() == target_hash_len);
-                    tls13_suite.map(|suite| {
+                    tls13_suite.and_then(|suite| {
+                        // RFC 9258: if PskMode::Imported, derive the imported PSK
+                        // and use the ImportedIdentity as the wire identity.
+                        let (wire_identity, wire_secret, imported) = match &psk.mode {
+                            crate::psk::PskMode::Imported { context } => {
+                                match crate::psk::import_psk(
+                                    suite,
+                                    &psk.identity,
+                                    &psk.secret,
+                                    context,
+                                ) {
+                                    Some((id, secret)) => (id, secret, true),
+                                    None => {
+                                        // ImportedIdentity too large; skip PSK
+                                        return None;
+                                    }
+                                }
+                            }
+                            crate::psk::PskMode::Plain => {
+                                (psk.identity.clone(), psk.secret, false)
+                            }
+                        };
                         tls13::prepare_external_psk(
                             suite,
-                            &psk.identity,
+                            &wire_identity,
                             &mut exts,
                         );
-                        (suite, psk.secret)
+                        Some((suite, wire_secret, imported))
                     })
                 })
         } else {
@@ -480,9 +504,10 @@ fn emit_client_hello_for_retry(
         )),
 
         // External PSK: fill in the binder using the external PSK binder key.
-        (_, None, Some((suite, secret))) => Some((
+        // If `imported` is true (RFC 9258), use "imp binder" label.
+        (_, None, Some((suite, secret, imported))) => Some((
             *suite,
-            tls13::fill_in_external_psk_binder(suite, secret, &transcript_buffer, &mut chp),
+            tls13::fill_in_external_psk_binder(suite, secret, *imported, &transcript_buffer, &mut chp),
         )),
 
         // No early key schedule in other cases.

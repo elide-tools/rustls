@@ -147,8 +147,12 @@ pub struct CertifiedKey {
     /// attesting to its continued validity.
     pub ocsp: Option<Vec<u8>>,
 
-    /// An optional DER-encoded `SignedCertificateTimestampList` (RFC 6962)
-    /// to be delivered via the `signed_certificate_timestamp` TLS extension.
+    /// Optional Signed Certificate Timestamp list, as a serialized
+    /// `SignedCertificateTimestampList` per [RFC 6962 Section 3.3].
+    /// Contains the concatenated `SerializedSCT` entries with their
+    /// individual length prefixes, WITHOUT the outer list length prefix.
+    ///
+    /// [RFC 6962 Section 3.3]: https://datatracker.ietf.org/doc/html/rfc6962#section-3.3
     pub sct_list: Option<Vec<u8>>,
 }
 

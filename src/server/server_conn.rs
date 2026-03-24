@@ -448,6 +448,16 @@ pub struct ServerConfig {
     /// [RFC8779]: https://datatracker.ietf.org/doc/rfc8879/
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
 
+    /// The PSK mode to use for external PSK resolution.
+    ///
+    /// When set to [`PskMode::Imported`](crate::psk::PskMode::Imported),
+    /// the server expects client PSK identities to be RFC 9258
+    /// `ImportedIdentity` structures and verifies binders using the
+    /// `"imp binder"` label. Both client and server must use the same mode.
+    ///
+    /// Defaults to [`PskMode::Plain`](crate::psk::PskMode::Plain).
+    pub psk_mode: crate::psk::PskMode,
+
     /// Optional external PSK resolver for TLS 1.3.
     ///
     /// When set, the server will check client-offered PSK identities

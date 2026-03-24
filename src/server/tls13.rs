@@ -133,21 +133,6 @@ mod client_hello {
             )
         }
 
-        fn check_external_binder(
-            &self,
-            suite: &'static Tls13CipherSuite,
-            client_hello: &Message<'_>,
-            psk: &[u8],
-            binder: &[u8],
-        ) -> bool {
-            self.check_binder_with(
-                suite,
-                client_hello,
-                psk,
-                binder,
-                KeyScheduleEarly::external_psk_binder_key_and_sign_verify_data,
-            )
-        }
 
         fn attempt_tls13_ticket_decryption(
             &mut self,
@@ -324,24 +309,65 @@ mod client_hello {
                 // RFC 8446 Section 4.2.11.
                 if let Some(ref psk_resolver) = self.config.psk_resolver {
                     let suite_hash_len = self.suite.common.hash_provider.output_len();
+                    let imported_mode = matches!(
+                        self.config.psk_mode,
+                        crate::psk::PskMode::Imported { .. }
+                    );
+
                     for (i, psk_id) in psk_offer.identities.iter().enumerate() {
                         // Skip PSK identities whose binder length doesn't match
-                        // the negotiated suite's hash. This means the client
-                        // computed the binder with a different hash algorithm
-                        // than our suite uses (e.g., PSK uses SHA-256 but we
-                        // negotiated a SHA-384 suite).
+                        // the negotiated suite's hash.
                         if psk_offer.binders[i].as_ref().len() != suite_hash_len {
                             continue;
                         }
 
-                        if let Some(secret) = psk_resolver.resolve(&psk_id.identity.0) {
-                            // Validate the binder using the external PSK binder key
-                            if !self.check_external_binder(
+                        // Extract the external identity: for imported mode,
+                        // parse the ImportedIdentity structure; for plain mode,
+                        // use the identity bytes directly.
+                        let external_identity = if imported_mode {
+                            match crate::psk::parse_imported_identity(&psk_id.identity.0) {
+                                Some((ext_id, _, _, _)) => ext_id,
+                                None => continue, // not a valid ImportedIdentity
+                            }
+                        } else {
+                            &psk_id.identity.0
+                        };
+
+                        if let Some(epsk_secret) = psk_resolver.resolve(external_identity) {
+                            // Determine the actual PSK and binder check function:
+                            // imported mode derives the PSK and uses "imp binder";
+                            // plain mode uses the raw secret and "ext binder".
+                            let (psk_for_binder, use_imported_binder) = if imported_mode {
+                                let ipsk = match crate::psk::import_psk(
+                                    self.suite,
+                                    external_identity,
+                                    &epsk_secret,
+                                    match &self.config.psk_mode {
+                                        crate::psk::PskMode::Imported { context } => context,
+                                        _ => unreachable!(),
+                                    },
+                                ) {
+                                    Some((_, ipsk)) => ipsk,
+                                    None => continue, // ImportedIdentity too large; skip this PSK
+                                };
+                                (ipsk, true)
+                            } else {
+                                (zeroize::Zeroizing::new(epsk_secret.clone()), false)
+                            };
+
+                            let binder_ok = self.check_binder_with(
                                 self.suite,
                                 chm,
-                                &secret,
+                                &psk_for_binder,
                                 psk_offer.binders[i].as_ref(),
-                            ) {
+                                if use_imported_binder {
+                                    KeyScheduleEarly::imported_psk_binder_key_and_sign_verify_data
+                                } else {
+                                    KeyScheduleEarly::external_psk_binder_key_and_sign_verify_data
+                                },
+                            );
+
+                            if !binder_ok {
                                 return Err(cx.common.send_fatal_alert(
                                     AlertDescription::DecryptError,
                                     PeerMisbehaved::IncorrectBinder,
@@ -349,7 +375,8 @@ mod client_hello {
                             }
 
                             chosen_psk_index = Some(i);
-                            external_psk_secret = Some(zeroize::Zeroizing::new(secret));
+                            // The key schedule uses the imported PSK (or raw PSK).
+                            external_psk_secret = Some(psk_for_binder);
                             break;
                         }
                     }
@@ -456,7 +483,13 @@ mod client_hello {
             }
 
             let mut ocsp_response = server_key.get_ocsp();
-            let sct_list = server_key.get_sct_list();
+            // RFC 6962: only include SCTs when the client offered the
+            // signed_certificate_timestamp extension in the ClientHello.
+            let sct_list = if client_hello.sct.is_some() {
+                server_key.get_sct_list()
+            } else {
+                None
+            };
             let mut flight = HandshakeFlightTls13::new(&mut self.transcript);
             let doing_early_data = emit_encrypted_extensions(
                 &mut flight,

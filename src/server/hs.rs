@@ -227,12 +227,12 @@ impl ExtensionProcessing {
     ) {
         use crate::msgs::base::PayloadU16;
 
-        // In TLS 1.2, SCTs are delivered via a ServerHello extension.
-        // We include them whenever available (most implementations do
-        // not require the client to explicitly request SCTs).
-        let _ = hello; // reserved for future client-request checking
-        if let Some(scts) = sct_list {
-            self.extensions.sct_list = Some(PayloadU16::new(scts.to_vec()));
+        // RFC 6962: only include SCTs when the client offered the
+        // signed_certificate_timestamp extension in the ClientHello.
+        if hello.sct.is_some() {
+            if let Some(scts) = sct_list {
+                self.extensions.sct_list = Some(PayloadU16::new(scts.to_vec()));
+            }
         }
     }
 

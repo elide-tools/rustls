@@ -924,6 +924,10 @@ extension_struct! {
         ExtensionType::EncryptedClientHello =>
             pub(crate) encrypted_client_hello: Option<EncryptedClientHello>,
 
+        /// Signed Certificate Timestamp request (RFC 6962, empty extension_data)
+        ExtensionType::SCT =>
+            pub(crate) sct: Option<()>,
+
         /// Encrypted client hello outer extensions (draft-ietf-tls-esni)
         ExtensionType::EncryptedClientHelloOuterExtensions =>
             pub(crate) encrypted_client_hello_outer: Option<Vec<ExtensionType>>,
@@ -960,6 +964,7 @@ impl ClientExtensions<'_> {
             transport_parameters,
             renegotiation_info,
             transport_parameters_draft,
+            sct,
             encrypted_client_hello,
             encrypted_client_hello_outer,
             order_seed,
@@ -987,6 +992,7 @@ impl ClientExtensions<'_> {
             transport_parameters: transport_parameters.map(|x| x.into_owned()),
             renegotiation_info,
             transport_parameters_draft: transport_parameters_draft.map(|x| x.into_owned()),
+            sct,
             encrypted_client_hello,
             encrypted_client_hello_outer,
             order_seed,

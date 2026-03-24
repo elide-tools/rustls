@@ -465,10 +465,12 @@ pub(super) fn prepare_external_psk(
 /// Fill in the binder for an external PSK in the ClientHello.
 ///
 /// This is the external PSK counterpart of [`fill_in_psk_binder`].
-/// It uses the `"ext binder"` label instead of `"res binder"`.
+/// It uses the `"ext binder"` label (RFC 8446) or `"imp binder"` label
+/// (RFC 9258) depending on `imported`.
 pub(super) fn fill_in_external_psk_binder(
     suite: &'static Tls13CipherSuite,
     secret: &[u8],
+    imported: bool,
     transcript: &HandshakeHashBuffer,
     hmp: &mut HandshakeMessagePayload<'_>,
 ) -> KeyScheduleEarly {
@@ -480,7 +482,11 @@ pub(super) fn fill_in_external_psk_binder(
     let handshake_hash = transcript.hash_given(suite_hash, &binder_plaintext);
 
     let key_schedule = KeyScheduleEarly::new(suite, secret);
-    let real_binder = key_schedule.external_psk_binder_key_and_sign_verify_data(&handshake_hash);
+    let real_binder = if imported {
+        key_schedule.imported_psk_binder_key_and_sign_verify_data(&handshake_hash)
+    } else {
+        key_schedule.external_psk_binder_key_and_sign_verify_data(&handshake_hash)
+    };
 
     if let HandshakePayload::ClientHello(ch) = &mut hmp.0 {
         if let Some(PresharedKeyOffer {

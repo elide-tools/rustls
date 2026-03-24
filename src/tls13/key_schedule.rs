@@ -109,6 +109,21 @@ impl KeyScheduleEarly {
         self.ks
             .sign_verify_data(&external_psk_binder_key, hs_hash)
     }
+
+    /// Compute the binder for an imported PSK (using the `"imp binder"` label).
+    ///
+    /// RFC 9258 Section 5.2: imported PSKs use `"imp binder"` instead of
+    /// `"ext binder"` or `"res binder"`.
+    pub(crate) fn imported_psk_binder_key_and_sign_verify_data(
+        &self,
+        hs_hash: &hash::Output,
+    ) -> hmac::Tag {
+        let imported_psk_binder_key = self
+            .ks
+            .derive_for_empty_hash(SecretKind::ImportedPskBinderKey);
+        self.ks
+            .sign_verify_data(&imported_psk_binder_key, hs_hash)
+    }
 }
 
 /// The "early secret" stage of the key schedule.
@@ -941,6 +956,20 @@ pub(crate) fn hkdf_expand_label_aead_key(
     })
 }
 
+/// [HKDF-Expand-Label] where the output is a slice (crate-visible for RFC 9258 PSK import).
+///
+/// This can fail because HKDF-Expand is limited in its maximum output length.
+pub(crate) fn hkdf_expand_label_slice_9258(
+    expander: &dyn HkdfExpander,
+    label: &[u8],
+    context: &[u8],
+    output: &mut [u8],
+) -> Result<(), OutputLengthError> {
+    hkdf_expand_label_inner(expander, label, context, output.len(), |e, info| {
+        e.expand_slice(info, output)
+    })
+}
+
 /// [HKDF-Expand-Label] where the output is a slice.
 ///
 /// This can fail because HKDF-Expand is limited in its maximum output length.
@@ -1011,6 +1040,8 @@ where
 enum SecretKind {
     ResumptionPskBinderKey,
     ExternalPskBinderKey,
+    /// RFC 9258: binder key for imported external PSKs.
+    ImportedPskBinderKey,
     ClientEarlyTrafficSecret,
     ClientHandshakeTrafficSecret,
     ServerHandshakeTrafficSecret,
@@ -1029,6 +1060,7 @@ impl SecretKind {
         match self {
             ResumptionPskBinderKey => b"res binder",
             ExternalPskBinderKey => b"ext binder",
+            ImportedPskBinderKey => b"imp binder",
             ClientEarlyTrafficSecret => b"c e traffic",
             ClientHandshakeTrafficSecret => b"c hs traffic",
             ServerHandshakeTrafficSecret => b"s hs traffic",

@@ -104,7 +104,13 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
     /// `cert_chain` is a vector of DER-encoded certificates.
     /// `key_der` is a DER-encoded private key as PKCS#1, PKCS#8, or SEC1.
     /// `ocsp` is a DER-encoded OCSP response. Ignored if zero length.
-    /// `sct_list` is a DER-encoded `SignedCertificateTimestampList`. Ignored if zero length.
+    /// `sct_list` is a serialized `SignedCertificateTimestampList` as defined in
+    /// [RFC 6962 Section 3.3]. This should contain the concatenated `SerializedSCT`
+    /// entries with their individual length prefixes, but WITHOUT the outer
+    /// `SignedCertificateTimestampList` length prefix (which is added automatically).
+    /// Ignored if zero length.
+    ///
+    /// [RFC 6962 Section 3.3]: https://datatracker.ietf.org/doc/html/rfc6962#section-3.3
     pub fn with_single_cert_with_ocsp_and_scts(
         self,
         cert_chain: Vec<CertificateDer<'static>>,
@@ -149,6 +155,7 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             cert_compressors: compress::default_cert_compressors().to_vec(),
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
+            psk_mode: crate::psk::PskMode::Plain,
             psk_resolver: None,
         }
     }
