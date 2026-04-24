@@ -378,7 +378,9 @@
 // is used to avoid needing `rustversion` to be compiled twice during
 // cross-compiling.
 #![cfg_attr(read_buf, feature(read_buf))]
-#![cfg_attr(read_buf, feature(core_io))]
+// `core_io` was renamed to `core_io_borrowed_buf` in rustc ~Nov 2023 (rust-lang/rust#117693);
+// the legacy name is no longer recognized on modern nightlies. The next line alone provides
+// what the `read_buf` path needs.
 #![cfg_attr(read_buf, feature(core_io_borrowed_buf))]
 #![cfg_attr(bench, feature(test))]
 #![no_std]
