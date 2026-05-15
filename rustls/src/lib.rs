@@ -382,6 +382,9 @@
 // the legacy name is no longer recognized on modern nightlies. The next line alone provides
 // what the `read_buf` path needs.
 #![cfg_attr(read_buf, feature(core_io_borrowed_buf))]
+// rustc 2026-05-12+ split BorrowedCursor back behind `core_io` (rust-lang/rust#154046);
+// enabling both gates covers nightlies on either side of that split.
+#![cfg_attr(read_buf, feature(core_io))]
 #![cfg_attr(bench, feature(test))]
 #![no_std]
 
